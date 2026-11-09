@@ -99,7 +99,7 @@ state = st.session_state
 
 # Streamlit forgets a widget's value when the widget isn't drawn, which would wipe
 # the hidden view's selection. Re-saving the values each run keeps both views.
-for _key in [f"{v}:{k}" for v in VIEWS for k in STATE_KEYS] + ["line_style"]:
+for _key in [f"{v}:{k}" for v in VIEWS for k in STATE_KEYS] + ["line_style", "rank_by"]:
     if _key in state:
         state[_key] = state[_key]
 
@@ -273,20 +273,26 @@ view["label"] = view["id"].map(labels)
 # Legend in leaderboard order: highest rating at the end of the period first.
 order = view.groupby("label")["rating"].last().sort_values(ascending=False).index.tolist()
 
-def keep_line_style():
+def keep_choice(key):
     # Clicking the active option would deselect it; keep the last choice instead.
-    if state["line_style"] is None:
-        state["line_style"] = state["_line_style"]
-    state["_line_style"] = state["line_style"]
+    if state[key] is None:
+        state[key] = state[f"_{key}"]
+    state[f"_{key}"] = state[key]
 
 
-state.setdefault("line_style", "Steps")
-state.setdefault("_line_style", state["line_style"])
-st.segmented_control("Line style", ["Steps", "Smooth"], key="line_style",
-                     on_change=keep_line_style, label_visibility="collapsed",
-                     help="Steps hold each rating until the next race; "
-                          "Smooth curves through the post-race ratings.")
-smooth = state["line_style"] == "Smooth"
+def choice(label, options, key, **kwargs) -> str:
+    """A segmented control that always has exactly one option picked."""
+    state.setdefault(key, options[0])
+    state.setdefault(f"_{key}", state[key])
+    st.segmented_control(label, options, key=key, on_change=keep_choice, args=(key,),
+                         **kwargs)
+    return state[key]
+
+
+smooth = choice("Line style", ["Steps", "Smooth"], "line_style",
+                label_visibility="collapsed",
+                help="Steps hold each rating until the next race; "
+                     "Smooth curves through the post-race ratings.") == "Smooth"
 
 fig = px.line(view, x="date", y="rating", color="label",
               line_shape="spline" if smooth else "hv",
@@ -320,4 +326,11 @@ if breaks:
 st.caption(f"Showing {shown} {cfg['many']}" + (f" ({'; '.join(notes)})" if notes else "")
            + ". Ratings are recorded after each race. Drag across the chart to zoom, "
            "double-click to zoom back out.")
-st.dataframe(summary(view, labels, cfg["column"]), hide_index=True, width="stretch")
+
+rank_by = choice("Rank by", ["End", "Peak", "Change"], "rank_by",
+                 help="Orders the table and numbers each row by this column. "
+                      "Equal values share a position.")
+table = summary(view, labels, cfg["column"]).sort_values(rank_by, ascending=False)
+table.insert(0, "#", table[rank_by].rank(method="min", ascending=False).astype(int))
+st.dataframe(table, hide_index=True, width="stretch",
+             column_config={"#": st.column_config.NumberColumn(width="small", pinned=True)})
