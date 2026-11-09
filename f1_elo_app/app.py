@@ -99,7 +99,7 @@ state = st.session_state
 
 # Streamlit forgets a widget's value when the widget isn't drawn, which would wipe
 # the hidden view's selection. Re-saving the values each run keeps both views.
-for _key in [f"{v}:{k}" for v in VIEWS for k in STATE_KEYS]:
+for _key in [f"{v}:{k}" for v in VIEWS for k in STATE_KEYS] + ["line_style"]:
     if _key in state:
         state[_key] = state[_key]
 
@@ -273,11 +273,30 @@ view["label"] = view["id"].map(labels)
 # Legend in leaderboard order: highest rating at the end of the period first.
 order = view.groupby("label")["rating"].last().sort_values(ascending=False).index.tolist()
 
-fig = px.line(view, x="date", y="rating", color="label", line_shape="hv",
+def keep_line_style():
+    # Clicking the active option would deselect it; keep the last choice instead.
+    if state["line_style"] is None:
+        state["line_style"] = state["_line_style"]
+    state["_line_style"] = state["line_style"]
+
+
+state.setdefault("line_style", "Steps")
+state.setdefault("_line_style", state["line_style"])
+st.segmented_control("Line style", ["Steps", "Smooth"], key="line_style",
+                     on_change=keep_line_style, label_visibility="collapsed",
+                     help="Steps hold each rating until the next race; "
+                          "Smooth curves through the post-race ratings.")
+smooth = state["line_style"] == "Smooth"
+
+fig = px.line(view, x="date", y="rating", color="label",
+              line_shape="spline" if smooth else "hv",
               custom_data=["name", "year", "round"], category_orders={"label": order},
               color_discrete_sequence=PALETTE)
 fig.update_traces(hovertemplate="<b>%{fullData.name}</b><br>%{customdata[1]} R%{customdata[2]}"
                                 " · %{customdata[0]}<br>ELO %{y:.0f}<extra></extra>")
+if smooth:
+    # Gentler than Plotly's default (1.0) so curves overshoot the real ratings less.
+    fig.update_traces(line_smoothing=0.6)
 fig.update_layout(height=560, hovermode="closest", legend_title_text="",
                   xaxis_title=None, yaxis_title="ELO rating",
                   margin=dict(l=10, r=10, t=10, b=10))
