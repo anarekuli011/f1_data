@@ -41,20 +41,20 @@ class EloConfig:
     initial_elo: float = 1000.0
 
     # K-factors for constructors.
-    k_constructor_race: float = 64.0
-    k_constructor_quali: float = 16.0
+    k_constructor_race: float = 96.0
+    k_constructor_quali: float = 24.0
 
     # K-factors for drivers, split by experience.
     # "Rookie" = race_count <= driver_experience_threshold.
     driver_experience_threshold: int = 30
     k_driver_race_rookie: float = 64.0
-    k_driver_race_veteran: float = 32.0
+    k_driver_race_veteran: float = 48.0
     k_driver_quali_rookie: float = 16.0
-    k_driver_quali_veteran: float = 8.0
+    k_driver_quali_veteran: float = 12.0
 
     # How strongly a driver's result is discounted/boosted by the relative
     # strength of the two constructors involved. Exponent on (rb / ra).
-    constructor_adjustment_exponent: float = 2.5
+    constructor_adjustment_exponent: float = 3.0
 
     # Standard ELO logistic scale (the "400" in the classic formula).
     elo_scale: float = 400.0
