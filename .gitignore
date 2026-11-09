@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Downloaded and generated data (rebuild with cli.py build / run_elo.py)
+cache/
+*.sqlite
+f1_elo_app/data/
+f1_elo_app/output/
+export/
+
+# Editor / OS
+.vscode/
+Thumbs.db
+.DS_Store
