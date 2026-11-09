@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "f1-elo",
+      "runtimeExecutable": "py",
+      "runtimeArgs": ["-m", "streamlit", "run", "f1_elo_app/app.py", "--server.headless", "true", "--server.port", "8501"],
+      "port": 8501
+    }
+  ]
+}
