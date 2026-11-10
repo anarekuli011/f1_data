@@ -56,6 +56,15 @@ class EloConfig:
     # strength of the two constructors involved. Exponent on (rb / ra).
     constructor_adjustment_exponent: float = 3.0
 
+    # Driver race pass only: when a classified driver is compared with a
+    # driver who did not finish (position == dnf_sentinel), both sides of
+    # that pair's driver delta are multiplied by this factor -- the DNF
+    # driver loses less and the finisher gains correspondingly less, so no
+    # rating is created or destroyed. Constructors still take the full
+    # penalty (reliability is part of car strength); qualifying is
+    # unaffected. 1.0 reproduces the original "DNF = last" behaviour.
+    driver_dnf_penalty_factor: float = 0.5
+
     # Standard ELO logistic scale (the "400" in the classic formula).
     elo_scale: float = 400.0
 

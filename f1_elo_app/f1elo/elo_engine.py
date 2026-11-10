@@ -8,6 +8,9 @@ How it works, per race:
      - Update constructor ratings (low K), then driver ratings (low K).
   2. RACE pass, ordered by finishing position ("\\N" = DNF = last).
      - Update constructor ratings (high K), then driver ratings (high K).
+     - Drivers only: a classified-vs-DNF pair is scaled by
+       ``driver_dnf_penalty_factor`` (default 0.5), so a retirement costs
+       the driver half as much. Constructors take the full penalty.
 
 Within each pass it does a full pairwise comparison: every entry is treated as
 having "beaten" every entry classified below it (score 1 vs 0). The per-entry
@@ -155,8 +158,14 @@ class EloEngine:
                 adj = ((con_rb / con_ra) if con_ra != 0 else 1.0) ** \
                     cfg.constructor_adjustment_exponent
 
-                new_ra = ra + k_a * (1 - ea) * adj   # sa = 1
-                new_rb = rb + k_b * (0 - eb) * adj    # sb = 0
+                # Classified driver vs a DNF in the race: soften the pair
+                # (the car may have failed). Applied to both sides so the
+                # pair stays balanced. DNF-vs-DNF pairs were skipped above.
+                dnf = (cfg.driver_dnf_penalty_factor
+                       if is_race and vb == sentinel else 1.0)
+
+                new_ra = ra + k_a * (1 - ea) * adj * dnf   # sa = 1
+                new_rb = rb + k_b * (0 - eb) * adj * dnf    # sb = 0
                 self._record(changes, self.highest_driver,
                              a, b, new_ra, new_rb, ra, rb)
 
