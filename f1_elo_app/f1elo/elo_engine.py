@@ -20,6 +20,10 @@ K-step, not N of them.
 
 Driver updates are additionally scaled by a constructor-strength adjustment:
 a driver in a much stronger car gains less for a win and loses more for a loss.
+
+Driver K-factors depend on a confidence level (0-20 races' worth, 5% per
+race): rookie K at 0%, veteran K at 100%, linear in between. A classified
+finish adds a race of confidence; a DNF or a missed race takes one away.
 """
 from __future__ import annotations
 
@@ -47,9 +51,14 @@ class EloEngine:
         self.highest_constructor: dict[int, float] = {}
         self.highest_driver: dict[int, float] = {}
 
-        # Number of classified races, used to pick driver K-factors.
+        # Number of classified races (kept for reference).
         self.constructor_race_count: dict[int, int] = {}
         self.driver_race_count: dict[int, int] = {}
+
+        # Driver confidence, in "races' worth" (0 .. driver_confidence_races).
+        # Drives the rookie -> veteran K-factor slide. Only drivers who have
+        # started at least one race are in here.
+        self.driver_confidence: dict[int, int] = {}
 
         # True while processing a race early in a new regulation era.
         self.era_start = False
@@ -69,12 +78,42 @@ class EloEngine:
                 return boost
         return c.k_constructor_race if is_race else c.k_constructor_quali
 
-    def _k_driver(self, race_count: int, is_race: bool) -> float:
+    def confidence_pct(self, driver_id) -> float:
+        """Driver confidence as a fraction: 0.0 (none) to 1.0 (full)."""
+        n = self.cfg.driver_confidence_races
+        if n <= 0:
+            return 1.0
+        return min(self.driver_confidence.get(driver_id, 0), n) / n
+
+    def _k_driver(self, driver_id, is_race: bool) -> float:
+        """Slide linearly from the rookie K (0%) to the veteran K (100%)."""
         c = self.cfg
-        rookie = race_count <= c.driver_experience_threshold
+        conf = self.confidence_pct(driver_id)
         if is_race:
-            return c.k_driver_race_rookie if rookie else c.k_driver_race_veteran
-        return c.k_driver_quali_rookie if rookie else c.k_driver_quali_veteran
+            rookie, veteran = c.k_driver_race_rookie, c.k_driver_race_veteran
+        else:
+            rookie, veteran = c.k_driver_quali_rookie, c.k_driver_quali_veteran
+        return rookie + (veteran - rookie) * conf
+
+    def _update_confidence(self, race: pd.DataFrame) -> None:
+        """After a race: +1 for a classified finish, -1 for a DNF, and -1 for
+        every driver who has raced before but wasn't in this one. Clamped to
+        0 .. driver_confidence_races."""
+        cap = self.cfg.driver_confidence_races
+        sentinel = self.cfg.dnf_sentinel
+
+        # A driver with several entries in one race (1950s shared drives)
+        # counts as finishing if any of their entries was classified.
+        finished: dict = {}
+        for d, pos in zip(race["driverId"], race["position"]):
+            finished[d] = finished.get(d, False) or pos != sentinel
+
+        conf = self.driver_confidence
+        for d in conf:
+            if d not in finished and conf[d] > 0:
+                conf[d] -= 1                      # missed this race
+        for d, ok in finished.items():
+            conf[d] = min(cap, max(0, conf.get(d, 0) + (1 if ok else -1)))
 
     # -- state helpers -----------------------------------------------------
     def _ensure_entities(self, df: pd.DataFrame) -> None:
@@ -162,8 +201,8 @@ class EloEngine:
                 con_ra = self.constructor_elo[ca]
                 con_rb = self.constructor_elo[cb]
 
-                k_a = self._k_driver(self.driver_race_count.get(a, 0), is_race)
-                k_b = self._k_driver(self.driver_race_count.get(b, 0), is_race)
+                k_a = self._k_driver(a, is_race)
+                k_b = self._k_driver(b, is_race)
                 ea = expected_score(ra, rb, cfg.elo_scale)
                 eb = 1.0 - ea
 
@@ -224,6 +263,10 @@ class EloEngine:
         race_order = self._order_by_position(race)
         self._constructor_pass(race_order, "position", cfg.dnf_sentinel, is_race=True)
         self._driver_pass(race_order, "position", cfg.dnf_sentinel, is_race=True)
+
+        # Confidence changes only after the whole weekend, so it affects the
+        # NEXT race's K-factors.
+        self._update_confidence(race)
 
         return race, dict(self.constructor_elo), dict(self.driver_elo)
 

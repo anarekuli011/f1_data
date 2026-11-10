@@ -68,9 +68,14 @@ class EloConfig:
     k_constructor_race_era_start: float | None = 60.0
     k_constructor_quali_era_start: float | None = 24.0
 
-    # K-factors for drivers, split by experience.
-    # "Rookie" = race_count <= driver_experience_threshold.
-    driver_experience_threshold: int = 30
+    # K-factors for drivers, scaled by a confidence level.
+    # Confidence runs from 0 to driver_confidence_races "races' worth"
+    # (20 -> each race is 5%). The driver's K slides linearly from the rookie
+    # value at 0% to the veteran value at 100%, for both race and quali.
+    # After each race: a classified finish adds 1; a DNF takes 1 away; every
+    # race a driver misses (once they've started at least one) takes 1 away.
+    # So a full season out (~20 races) brings a driver back to 0%.
+    driver_confidence_races: int = 20
     k_driver_race_rookie: float = 64.0
     k_driver_race_veteran: float = 48.0
     k_driver_quali_rookie: float = 16.0
