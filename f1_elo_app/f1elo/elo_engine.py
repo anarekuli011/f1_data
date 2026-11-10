@@ -262,8 +262,23 @@ class EloEngine:
         constructor / driver rating snapshots to write back.
         """
         cfg = self.cfg
-        year = int(race["year"].iloc[0])
-        self.era_start = self.in_era_start(year, int(race["round"].iloc[0]))
+        self.process_ordered(
+            int(race["year"].iloc[0]), int(race["round"].iloc[0]),
+            self._order_by_grid(race, cfg.no_grid_sentinel),
+            self._order_by_position(race),
+        )
+        return race, dict(self.constructor_elo), dict(self.driver_elo)
+
+    def process_ordered(self, year: int, rnd: int, quali_order: pd.DataFrame,
+                        race_order: pd.DataFrame) -> None:
+        """Process one race whose entries are already sorted.
+
+        ``quali_order`` is sorted by grid and ``race_order`` by finishing
+        position; both need driverId, constructorId and grid / position.
+        Backtests call this directly so they share the exact same logic.
+        """
+        cfg = self.cfg
+        self.era_start = self.in_era_start(year, rnd)
 
         # First race of a regulation-change season: drop driver confidence
         # before this race, so the higher K applies from round 1.
@@ -273,20 +288,16 @@ class EloEngine:
             self._last_year = year
 
         # ----- QUALIFYING (low K), ordered by grid -----
-        quali_order = self._order_by_grid(race, cfg.no_grid_sentinel)
         self._constructor_pass(quali_order, "grid", cfg.no_grid_sentinel, is_race=False)
         self._driver_pass(quali_order, "grid", cfg.no_grid_sentinel, is_race=False)
 
         # ----- RACE (high K), ordered by finishing position -----
-        race_order = self._order_by_position(race)
         self._constructor_pass(race_order, "position", cfg.dnf_sentinel, is_race=True)
         self._driver_pass(race_order, "position", cfg.dnf_sentinel, is_race=True)
 
         # Confidence changes only after the whole weekend, so it affects the
         # NEXT race's K-factors.
-        self._update_confidence(race)
-
-        return race, dict(self.constructor_elo), dict(self.driver_elo)
+        self._update_confidence(race_order)
 
     # -- public entry point ------------------------------------------------
     def run(self, df: pd.DataFrame, progress: bool = False) -> pd.DataFrame:

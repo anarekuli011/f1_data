@@ -28,16 +28,66 @@ Scores, all averaged over pairs:
 
 Only the ratio K / elo_scale matters for these predictions (everyone starts
 equal), so tune K with the scale held fixed.
+
+Driver backtest
+---------------
+Runs the full engine (constructors and drivers) and, before each race, scores
+the driver ratings on TEAMMATE pairs only. Teammates share a car, so who
+beats whom is mostly down to the drivers; that tests whether the driver
+ratings measure skill rather than car strength. Three scores per race:
+  * ``race``    -- teammates both classified (the main score: who was faster,
+                   without mechanical DNFs adding noise).
+  * ``raceall`` -- all teammate pairs, a DNF counting as a loss.
+  * ``quali``   -- teammates by grid position (both with a grid slot).
 """
 from __future__ import annotations
 
 import math
+import re
 from dataclasses import replace
 
 import pandas as pd
 
 from .config import DEFAULT_CONFIG, EloConfig
 from .elo_engine import EloEngine, expected_score
+
+
+# ---------------------------------------------------------------------------
+# Small helpers shared by the backtest scripts
+# ---------------------------------------------------------------------------
+def parse_period(text: str) -> tuple[str, tuple[int, int]]:
+    """'2015-2026' -> ('2015-2026', (2015, 2026)); '2024' -> one season."""
+    m = re.fullmatch(r"\s*(\d{4})\s*(?:-\s*(\d{4}))?\s*", text)
+    if not m:
+        raise ValueError(f"period must look like 2015-2026 or 2024, got {text!r}")
+    start = int(m.group(1))
+    end = int(m.group(2) or start)
+    if end < start:
+        raise ValueError(f"period {text!r} ends before it starts")
+    return f"{start}-{end}", (start, end)
+
+
+def value_range(bounds: list[float], step: float) -> list[float]:
+    """MIN MAX plus a step -> the values to test (MAX included when hit).
+
+    One value means "just this value". Whole numbers come back as ints so
+    tables print cleanly.
+    """
+    if len(bounds) == 1:
+        bounds = bounds * 2
+    if len(bounds) != 2:
+        raise ValueError("takes MIN MAX (or a single value)")
+    lo, hi = bounds
+    if lo < 0 or hi < lo:
+        raise ValueError(f"need 0 <= MIN <= MAX, got {lo:g} {hi:g}")
+    if step <= 0:
+        raise ValueError(f"increment must be positive, got {step:g}")
+    values, i = [], 0
+    while lo + i * step <= hi + 1e-9:
+        v = round(lo + i * step, 6)
+        values.append(int(v) if float(v).is_integer() else v)
+        i += 1
+    return values
 
 
 def prepare_races(df: pd.DataFrame, cfg: EloConfig = DEFAULT_CONFIG) -> list[tuple]:
@@ -55,8 +105,8 @@ def prepare_races(df: pd.DataFrame, cfg: EloConfig = DEFAULT_CONFIG) -> list[tup
             race_id,
             int(race["year"].iloc[0]),
             int(race["round"].iloc[0]),
-            quali[["constructorId", "grid"]].reset_index(drop=True),
-            result[["constructorId", "position"]].reset_index(drop=True),
+            quali[["driverId", "constructorId", "grid"]].reset_index(drop=True),
+            result[["driverId", "constructorId", "position"]].reset_index(drop=True),
         ))
     return prepared
 
@@ -166,4 +216,143 @@ def sweep_constructor_k(prepared: list[tuple], race_ks, quali_ks,
             boost = "" if br is None and bq is None else f"  boost {br}/{bq}"
             print(f"  {n}/{len(combos)}  K race={kr:<5} K quali={kq:<5}{boost}",
                   flush=True)
+    return pd.DataFrame(rows)
+
+
+# ---------------------------------------------------------------------------
+# Driver backtest
+# ---------------------------------------------------------------------------
+# The driver settings a sweep can vary, in the order they're reported.
+DRIVER_PARAMS = ("race_k", "quali_k", "rookie_ratio", "exponent", "dnf_factor")
+
+
+def driver_defaults(cfg: EloConfig = DEFAULT_CONFIG) -> dict[str, float]:
+    """The current config expressed as the sweep's parameters."""
+    return {
+        "race_k": cfg.k_driver_race_veteran,
+        "quali_k": cfg.k_driver_quali_veteran,
+        "rookie_ratio": round(cfg.k_driver_race_rookie / cfg.k_driver_race_veteran, 4),
+        "exponent": cfg.constructor_adjustment_exponent,
+        "dnf_factor": cfg.driver_dnf_penalty_factor,
+    }
+
+
+def driver_config(base: EloConfig, race_k: float, quali_k: float,
+                  rookie_ratio: float, exponent: float,
+                  dnf_factor: float) -> EloConfig:
+    """Build a config from sweep parameters.
+
+    race_k / quali_k are the VETERAN (100% confidence) K-factors; the rookie
+    (0% confidence) K-factors are rookie_ratio times those.
+    """
+    return replace(
+        base,
+        k_driver_race_veteran=float(race_k),
+        k_driver_race_rookie=float(race_k) * rookie_ratio,
+        k_driver_quali_veteran=float(quali_k),
+        k_driver_quali_rookie=float(quali_k) * rookie_ratio,
+        constructor_adjustment_exponent=float(exponent),
+        driver_dnf_penalty_factor=float(dnf_factor),
+    )
+
+
+def _score_teammates(ratings: dict, drivers: list, teams: list, vals: list,
+                     skip, scale: float):
+    """Score teammate pairs (i is ahead of j) against the current ratings."""
+    n_pairs = 0
+    logloss = brier = correct = 0.0
+    n = len(drivers)
+    for i in range(n):
+        a, ta, va = drivers[i], teams[i], vals[i]
+        for j in range(i + 1, n):
+            b, tb, vb = drivers[j], teams[j], vals[j]
+            if ta != tb or a == b or skip(va, vb):
+                continue
+            p = expected_score(ratings[a], ratings[b], scale)
+            p = min(max(p, 1e-12), 1 - 1e-12)
+            logloss -= math.log(p)
+            brier += (1.0 - p) ** 2
+            correct += 1.0 if p > 0.5 else (0.5 if p == 0.5 else 0.0)
+            n_pairs += 1
+    return n_pairs, logloss, brier, correct
+
+
+def driver_backtest(prepared: list[tuple],
+                    cfg: EloConfig = DEFAULT_CONFIG) -> pd.DataFrame:
+    """Run the full engine over every race, scoring teammate pairs first.
+
+    Returns one row per race with pair counts and summed scores for the
+    ``race``, ``raceall`` and ``quali`` teammate comparisons.
+    """
+    engine = EloEngine(cfg)
+    init = cfg.initial_elo
+    dnf, no_grid, scale = cfg.dnf_sentinel, cfg.no_grid_sentinel, cfg.elo_scale
+    skips = {
+        "race": lambda va, vb: va == dnf or vb == dnf,
+        "raceall": lambda va, vb: va == dnf and vb == dnf,
+        "quali": lambda va, vb: va == no_grid or vb == no_grid,
+    }
+    rows = []
+    for race_id, year, rnd, quali, result in prepared:
+        for d, c in zip(result["driverId"], result["constructorId"]):
+            engine.driver_elo.setdefault(d, init)
+            engine.highest_driver.setdefault(d, init)
+            engine.constructor_elo.setdefault(c, init)
+            engine.highest_constructor.setdefault(c, init)
+
+        row = {"raceId": race_id, "year": year}
+        for name, frame, col in (("race", result, "position"),
+                                 ("raceall", result, "position"),
+                                 ("quali", quali, "grid")):
+            n, ll, br, co = _score_teammates(
+                engine.driver_elo, frame["driverId"].tolist(),
+                frame["constructorId"].tolist(), frame[col].tolist(),
+                skips[name], scale)
+            row.update({f"{name}_pairs": n, f"{name}_logloss": ll,
+                        f"{name}_brier": br, f"{name}_correct": co})
+        rows.append(row)
+
+        engine.process_ordered(year, rnd, quali, result)
+    return pd.DataFrame(rows)
+
+
+def summarise_drivers(per_race: pd.DataFrame, start: int, end: int) -> dict:
+    """Pool per-race sums into mean scores for races in [start, end]."""
+    r = per_race[(per_race["year"] >= start) & (per_race["year"] <= end)]
+    if r.empty:
+        return {}
+    out = {"races": len(r)}
+    for name in ("race", "raceall", "quali"):
+        n = r[f"{name}_pairs"].sum()
+        out[f"{name}_pairs"] = int(n)
+        for stat in ("logloss", "brier"):
+            out[f"{name}_{stat}"] = r[f"{name}_{stat}"].sum() / n if n else float("nan")
+        out[f"{name}_acc"] = r[f"{name}_correct"].sum() / n if n else float("nan")
+    return out
+
+
+def sweep_drivers(prepared: list[tuple], grid: dict[str, list],
+                  periods: dict[str, tuple[int, int]],
+                  base: EloConfig = DEFAULT_CONFIG,
+                  progress: bool = False) -> pd.DataFrame:
+    """Grid-search driver settings; one row per (combo, period).
+
+    ``grid`` maps each name in DRIVER_PARAMS to the values to try; missing
+    names stay at the current config value.
+    """
+    values = {**{k: [v] for k, v in driver_defaults(base).items()}, **grid}
+    combos = [{}]
+    for name in DRIVER_PARAMS:
+        combos = [{**c, name: v} for c in combos for v in values[name]]
+    rows = []
+    for n, combo in enumerate(combos, 1):
+        per_race = driver_backtest(prepared, driver_config(base, **combo))
+        for label, (start, end) in periods.items():
+            s = summarise_drivers(per_race, start, end)
+            if s:
+                rows.append({**combo, "period": label, **s})
+        if progress:
+            desc = "  ".join(f"{k}={combo[k]:g}" for k in DRIVER_PARAMS
+                             if len(values[k]) > 1)
+            print(f"  {n}/{len(combos)}  {desc}", flush=True)
     return pd.DataFrame(rows)
