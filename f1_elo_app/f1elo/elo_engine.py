@@ -8,6 +8,9 @@ How it works, per race:
      - Update constructor ratings (low K), then driver ratings (low K).
   2. RACE pass, ordered by finishing position ("\\N" = DNF = last).
      - Update constructor ratings (high K), then driver ratings (high K).
+     - Drivers only: a classified-vs-DNF pair is scaled by
+       ``driver_dnf_penalty_factor`` (default 0.5), so a retirement costs
+       the driver half as much. Constructors take the full penalty.
 
 Within each pass it does a full pairwise comparison: every entry is treated as
 having "beaten" every entry classified below it (score 1 vs 0). The per-entry
@@ -17,6 +20,12 @@ K-step, not N of them.
 
 Driver updates are additionally scaled by a constructor-strength adjustment:
 a driver in a much stronger car gains less for a win and loses more for a loss.
+
+Driver K-factors depend on a confidence level (0-20 races' worth, 5% per
+race): rookie K at 0%, veteran K at 100%, linear in between. A classified
+finish adds a race of confidence; a DNF or a missed race takes one away. At
+the first race of a regulation-change season, every driver loses
+``era_start_confidence_drop`` (50 percentage points) of confidence.
 """
 from __future__ import annotations
 
@@ -44,21 +53,84 @@ class EloEngine:
         self.highest_constructor: dict[int, float] = {}
         self.highest_driver: dict[int, float] = {}
 
-        # Number of classified races, used to pick driver K-factors.
+        # Number of classified races (kept for reference).
         self.constructor_race_count: dict[int, int] = {}
         self.driver_race_count: dict[int, int] = {}
 
-    # -- K-factors ---------------------------------------------------------
-    def _k_constructor(self, is_race: bool) -> float:
-        c = self.cfg
-        return c.k_constructor_race if is_race else c.k_constructor_quali
+        # Driver confidence, in "races' worth" (0 .. driver_confidence_races).
+        # Drives the rookie -> veteran K-factor slide. Only drivers who have
+        # started at least one race are in here.
+        self.driver_confidence: dict[int, float] = {}
 
-    def _k_driver(self, race_count: int, is_race: bool) -> float:
+        # Season of the last race processed, to spot the first race of a year.
+        self._last_year: int | None = None
+
+        # Era confidence for the race being processed: 0.0 at the first race
+        # of a regulation-change season, 1.0 once the era has settled.
+        self.era_conf = 1.0
+
+    # -- K-factors ---------------------------------------------------------
+    def era_confidence(self, year: int, rnd: int) -> float:
+        """0.0 at round 1 of a regulation-change season, rising by
+        1/era_start_races per race already run, capped at 1.0. Any other
+        season is 1.0 (settled)."""
         c = self.cfg
-        rookie = race_count <= c.driver_experience_threshold
+        if year not in c.regulation_change_years or c.era_start_races <= 0:
+            return 1.0
+        return min(1.0, (rnd - 1) / c.era_start_races)
+
+    def _k_constructor(self, is_race: bool) -> float:
+        """Slide from the era-start K (0% era confidence) to the normal K."""
+        c = self.cfg
+        normal = c.k_constructor_race if is_race else c.k_constructor_quali
+        boost = (c.k_constructor_race_era_start if is_race
+                 else c.k_constructor_quali_era_start)
+        if boost is None or self.era_conf >= 1.0:
+            return normal
+        return boost + (normal - boost) * self.era_conf
+
+    def confidence_pct(self, driver_id) -> float:
+        """Driver confidence as a fraction: 0.0 (none) to 1.0 (full)."""
+        n = self.cfg.driver_confidence_races
+        if n <= 0:
+            return 1.0
+        return min(self.driver_confidence.get(driver_id, 0), n) / n
+
+    def _k_driver(self, driver_id, is_race: bool) -> float:
+        """Slide linearly from the rookie K (0%) to the veteran K (100%)."""
+        c = self.cfg
+        conf = self.confidence_pct(driver_id)
         if is_race:
-            return c.k_driver_race_rookie if rookie else c.k_driver_race_veteran
-        return c.k_driver_quali_rookie if rookie else c.k_driver_quali_veteran
+            rookie, veteran = c.k_driver_race_rookie, c.k_driver_race_veteran
+        else:
+            rookie, veteran = c.k_driver_quali_rookie, c.k_driver_quali_veteran
+        return rookie + (veteran - rookie) * conf
+
+    def _era_start_confidence_drop(self) -> None:
+        """New regulations: knock every driver's confidence down (floor 0)."""
+        drop = self.cfg.era_start_confidence_drop * self.cfg.driver_confidence_races
+        for d in self.driver_confidence:
+            self.driver_confidence[d] = max(0.0, self.driver_confidence[d] - drop)
+
+    def _update_confidence(self, race: pd.DataFrame) -> None:
+        """After a race: +1 for a classified finish, -1 for a DNF, and -1 for
+        every driver who has raced before but wasn't in this one. Clamped to
+        0 .. driver_confidence_races."""
+        cap = self.cfg.driver_confidence_races
+        sentinel = self.cfg.dnf_sentinel
+
+        # A driver with several entries in one race (1950s shared drives)
+        # counts as finishing if any of their entries was classified.
+        finished: dict = {}
+        for d, pos in zip(race["driverId"], race["position"]):
+            finished[d] = finished.get(d, False) or pos != sentinel
+
+        conf = self.driver_confidence
+        for d in conf:
+            if d not in finished and conf[d] > 0:
+                conf[d] -= 1                      # missed this race
+        for d, ok in finished.items():
+            conf[d] = min(cap, max(0, conf.get(d, 0) + (1 if ok else -1)))
 
     # -- state helpers -----------------------------------------------------
     def _ensure_entities(self, df: pd.DataFrame) -> None:
@@ -146,8 +218,8 @@ class EloEngine:
                 con_ra = self.constructor_elo[ca]
                 con_rb = self.constructor_elo[cb]
 
-                k_a = self._k_driver(self.driver_race_count.get(a, 0), is_race)
-                k_b = self._k_driver(self.driver_race_count.get(b, 0), is_race)
+                k_a = self._k_driver(a, is_race)
+                k_b = self._k_driver(b, is_race)
                 ea = expected_score(ra, rb, cfg.elo_scale)
                 eb = 1.0 - ea
 
@@ -155,8 +227,14 @@ class EloEngine:
                 adj = ((con_rb / con_ra) if con_ra != 0 else 1.0) ** \
                     cfg.constructor_adjustment_exponent
 
-                new_ra = ra + k_a * (1 - ea) * adj   # sa = 1
-                new_rb = rb + k_b * (0 - eb) * adj    # sb = 0
+                # Classified driver vs a DNF in the race: soften the pair
+                # (the car may have failed). Applied to both sides so the
+                # pair stays balanced. DNF-vs-DNF pairs were skipped above.
+                dnf = (cfg.driver_dnf_penalty_factor
+                       if is_race and vb == sentinel else 1.0)
+
+                new_ra = ra + k_a * (1 - ea) * adj * dnf   # sa = 1
+                new_rb = rb + k_b * (0 - eb) * adj * dnf    # sb = 0
                 self._record(changes, self.highest_driver,
                              a, b, new_ra, new_rb, ra, rb)
 
@@ -190,18 +268,42 @@ class EloEngine:
         constructor / driver rating snapshots to write back.
         """
         cfg = self.cfg
+        self.process_ordered(
+            int(race["year"].iloc[0]), int(race["round"].iloc[0]),
+            self._order_by_grid(race, cfg.no_grid_sentinel),
+            self._order_by_position(race),
+        )
+        return race, dict(self.constructor_elo), dict(self.driver_elo)
+
+    def process_ordered(self, year: int, rnd: int, quali_order: pd.DataFrame,
+                        race_order: pd.DataFrame) -> None:
+        """Process one race whose entries are already sorted.
+
+        ``quali_order`` is sorted by grid and ``race_order`` by finishing
+        position; both need driverId, constructorId and grid / position.
+        Backtests call this directly so they share the exact same logic.
+        """
+        cfg = self.cfg
+        self.era_conf = self.era_confidence(year, rnd)
+
+        # First race of a regulation-change season: drop driver confidence
+        # before this race, so the higher K applies from round 1.
+        if year != self._last_year:
+            if year in cfg.regulation_change_years:
+                self._era_start_confidence_drop()
+            self._last_year = year
 
         # ----- QUALIFYING (low K), ordered by grid -----
-        quali_order = self._order_by_grid(race, cfg.no_grid_sentinel)
         self._constructor_pass(quali_order, "grid", cfg.no_grid_sentinel, is_race=False)
         self._driver_pass(quali_order, "grid", cfg.no_grid_sentinel, is_race=False)
 
         # ----- RACE (high K), ordered by finishing position -----
-        race_order = self._order_by_position(race)
         self._constructor_pass(race_order, "position", cfg.dnf_sentinel, is_race=True)
         self._driver_pass(race_order, "position", cfg.dnf_sentinel, is_race=True)
 
-        return race, dict(self.constructor_elo), dict(self.driver_elo)
+        # Confidence changes only after the whole weekend, so it affects the
+        # NEXT race's K-factors.
+        self._update_confidence(race_order)
 
     # -- public entry point ------------------------------------------------
     def run(self, df: pd.DataFrame, progress: bool = False) -> pd.DataFrame:
