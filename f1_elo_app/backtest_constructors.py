@@ -3,7 +3,11 @@
     py backtest_constructors.py                    # 1990-latest, plus last 5 as a check
     py backtest_constructors.py --last 10          # last 10 seasons only
     py backtest_constructors.py --period 2015-2026 --period 1979-2014
-    py backtest_constructors.py --race-k 40 48 56 --quali-k 10 12 14
+    py backtest_constructors.py --period 2010-2026 --race-k 40 72 --race-increment 4 --quali-k 0 24 --quali-increment 2
+
+--race-k / --quali-k take MIN MAX (inclusive); --race-increment /
+--quali-increment set the step between them. Defaults: race K 16-128 in
+steps of 8, quali K 0-32 in steps of 4.
 
 For every (race K, qualifying K) pair it replays ALL races from 1950 (so the
 ratings are properly warmed up), but only scores the races inside each
@@ -53,6 +57,31 @@ def parse_period(text: str) -> tuple[str, tuple[int, int]]:
     return f"{start}-{end}", (start, end)
 
 
+def k_values(parser: argparse.ArgumentParser, name: str,
+             bounds: list[float], step: float) -> list[float]:
+    """Turn 'MIN MAX' plus an increment into the list of K values to test.
+
+    MAX is included when the increment lands on it exactly; one value means
+    "test just this K".
+    """
+    if len(bounds) == 1:
+        bounds = bounds * 2
+    if len(bounds) != 2:
+        parser.error(f"{name} takes MIN MAX (or a single value)")
+    lo, hi = bounds
+    if lo < 0 or hi < lo:
+        parser.error(f"{name}: need 0 <= MIN <= MAX, got {lo:g} {hi:g}")
+    if step <= 0:
+        parser.error(f"{name} increment must be positive, got {step:g}")
+    values = []
+    i = 0
+    while lo + i * step <= hi + 1e-9:
+        v = round(lo + i * step, 6)
+        values.append(int(v) if v.is_integer() else v)
+        i += 1
+    return values
+
+
 def main() -> None:
     p = argparse.ArgumentParser(description="Backtest constructor K-factors.")
     p.add_argument("--period", type=parse_period, action="append",
@@ -61,15 +90,27 @@ def main() -> None:
                    help="Score the last N seasons in the data. Includes the "
                         "current, possibly unfinished, season. With no --period "
                         "or --last, scores 1990-latest and the last 5 seasons.")
-    p.add_argument("--race-k", type=float, nargs="+",
-                   default=[16, 24, 32, 40, 48, 56, 64, 80, 96, 128, 160, 192, 256])
-    p.add_argument("--quali-k", type=float, nargs="+",
-                   default=[0, 4, 8, 12, 16, 20, 24, 32, 48])
+    p.add_argument("--race-k", type=float, nargs="+", metavar=("MIN", "MAX"),
+                   default=[16, 128],
+                   help="Race K range to test: MIN MAX (or one value). "
+                        "Default 16 128.")
+    p.add_argument("--race-increment", type=float, default=8,
+                   help="Step between race K values. Default 8.")
+    p.add_argument("--quali-k", type=float, nargs="+", metavar=("MIN", "MAX"),
+                   default=[0, 32],
+                   help="Qualifying K range to test: MIN MAX (or one value). "
+                        "Default 0 32.")
+    p.add_argument("--quali-increment", type=float, default=4,
+                   help="Step between qualifying K values. Default 4.")
     p.add_argument("--metric", default="pre_logloss",
                    choices=["pre_logloss", "postq_logloss", "pre_brier", "postq_brier"],
                    help="pre_* = predict before the weekend, "
                         "postq_* = predict after qualifying.")
     args = p.parse_args()
+    race_ks = k_values(p, "--race-k", args.race_k, args.race_increment)
+    quali_ks = k_values(p, "--quali-k", args.quali_k, args.quali_increment)
+    print(f"Race K:  {', '.join(f'{k:g}' for k in race_ks)}")
+    print(f"Quali K: {', '.join(f'{k:g}' for k in quali_ks)}")
 
     print("Preparing races ...")
     prepared = prepare_races(build_race_frame())
@@ -86,8 +127,9 @@ def main() -> None:
         periods[f"last 5 ({latest - 4}-{latest}, check)"] = (latest - 4, latest)
 
     print(f"Scoring periods: {', '.join(periods)}")
-    print(f"Running {len(args.race_k) * len(args.quali_k)} backtests ...")
-    res = sweep_constructor_k(prepared, args.race_k, args.quali_k, periods,
+    print(f"Running {len(race_ks) * len(quali_ks)} backtests "
+          f"(about 1.3 s each) ...")
+    res = sweep_constructor_k(prepared, race_ks, quali_ks, periods,
                               progress=True)
 
     out = config.OUTPUT_DIR / "backtest_constructors.csv"
