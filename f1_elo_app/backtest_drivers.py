@@ -13,9 +13,16 @@ you can tune one or two at a time:
                             for both race and quali (now 64/48 = 1.33)
     --exponent MIN MAX      constructor_adjustment_exponent
     --dnf-factor MIN MAX    driver_dnf_penalty_factor
+    --confidence-drop MIN MAX
+                            era_start_confidence_drop (0.5 = every driver
+                            loses 50 points of confidence at a new era)
 
 each with a matching --...-increment. The constructor settings are taken
 from the config as they are.
+
+--era-seasons adds a score over just the regulation-change seasons
+(1998, 2009, 2014, ...) pooled together, plus the season after each one --
+where an era-start setting such as --confidence-drop actually matters.
 
 Every race from 1950 is replayed with the full engine; before each race in
 the scoring period, every pair of TEAMMATES is predicted from the driver
@@ -59,6 +66,8 @@ OPTIONS = {
                  "constructor adjustment exponent"),
     "dnf_factor": ("--dnf-factor", "--dnf-factor-increment", 0.1,
                    "driver DNF penalty factor"),
+    "confidence_drop": ("--confidence-drop", "--confidence-drop-increment", 0.1,
+                        "era-start driver confidence drop (0.5 = 50 points)"),
 }
 
 
@@ -76,6 +85,9 @@ def main() -> None:
                                        f"Default: current value {current[name]:g}.")
         p.add_argument(step_flag, type=float, default=step,
                        dest=f"{name}_step", help=f"Step for {flag}. Default {step:g}.")
+    p.add_argument("--era-seasons", action="store_true",
+                   help="Also score the regulation-change seasons since 1990 "
+                        "pooled together, and the seasons right after them.")
     p.add_argument("--metric", default="race_logloss",
                    choices=["race_logloss", "raceall_logloss", "quali_logloss",
                             "race_brier", "raceall_brier", "quali_brier"],
@@ -115,6 +127,13 @@ def main() -> None:
     if not periods:
         periods[f"{DEFAULT_SINCE}-{latest} (use this)"] = (DEFAULT_SINCE, latest)
         periods[f"last 5 ({latest - 4}-{latest}, check)"] = (latest - 4, latest)
+    if args.era_seasons:
+        eras = sorted(y for y in config.DEFAULT_CONFIG.regulation_change_years
+                      if DEFAULT_SINCE <= y <= latest)
+        periods[f"era-start seasons ({', '.join(map(str, eras))})"] = frozenset(eras)
+        after = [y + 1 for y in eras if y + 1 <= latest]
+        if after:
+            periods[f"seasons after ({', '.join(map(str, after))})"] = frozenset(after)
     print(f"Scoring periods: {', '.join(periods)}")
 
     # The current config, as the baseline to beat.
@@ -136,7 +155,7 @@ def main() -> None:
     prefix = args.metric.split("_")[0]
     acc_col, pairs_col = f"{prefix}_acc", f"{prefix}_pairs"
     pd.set_option("display.width", 200)
-    for period, (start, end) in periods.items():
+    for period, spec in periods.items():
         r = res[res["period"] == period]
         if r.empty:
             print(f"=== {period}: no races in the data ===\n")
@@ -153,7 +172,7 @@ def main() -> None:
         print(r.nsmallest(10, args.metric)[cols + [args.metric, acc_col]]
               .round(4).to_string(index=False))
 
-        cur = summarise_drivers(base_run, start, end)[args.metric]
+        cur = summarise_drivers(base_run, spec)[args.metric]
         print(f"Current config:  {args.metric} {cur:.4f}")
         desc = ", ".join(f"{k} {best[k]:g}" for k in (varied or DRIVER_PARAMS))
         print(f"Best:            {desc}  {args.metric} {best[args.metric]:.4f}  "

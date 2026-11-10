@@ -223,7 +223,8 @@ def sweep_constructor_k(prepared: list[tuple], race_ks, quali_ks,
 # Driver backtest
 # ---------------------------------------------------------------------------
 # The driver settings a sweep can vary, in the order they're reported.
-DRIVER_PARAMS = ("race_k", "quali_k", "rookie_ratio", "exponent", "dnf_factor")
+DRIVER_PARAMS = ("race_k", "quali_k", "rookie_ratio", "exponent", "dnf_factor",
+                 "confidence_drop")
 
 
 def driver_defaults(cfg: EloConfig = DEFAULT_CONFIG) -> dict[str, float]:
@@ -234,12 +235,13 @@ def driver_defaults(cfg: EloConfig = DEFAULT_CONFIG) -> dict[str, float]:
         "rookie_ratio": round(cfg.k_driver_race_rookie / cfg.k_driver_race_veteran, 4),
         "exponent": cfg.constructor_adjustment_exponent,
         "dnf_factor": cfg.driver_dnf_penalty_factor,
+        "confidence_drop": cfg.era_start_confidence_drop,
     }
 
 
 def driver_config(base: EloConfig, race_k: float, quali_k: float,
                   rookie_ratio: float, exponent: float,
-                  dnf_factor: float) -> EloConfig:
+                  dnf_factor: float, confidence_drop: float) -> EloConfig:
     """Build a config from sweep parameters.
 
     race_k / quali_k are the VETERAN (100% confidence) K-factors; the rookie
@@ -253,6 +255,7 @@ def driver_config(base: EloConfig, race_k: float, quali_k: float,
         k_driver_quali_rookie=float(quali_k) * rookie_ratio,
         constructor_adjustment_exponent=float(exponent),
         driver_dnf_penalty_factor=float(dnf_factor),
+        era_start_confidence_drop=float(confidence_drop),
     )
 
 
@@ -316,9 +319,18 @@ def driver_backtest(prepared: list[tuple],
     return pd.DataFrame(rows)
 
 
-def summarise_drivers(per_race: pd.DataFrame, start: int, end: int) -> dict:
-    """Pool per-race sums into mean scores for races in [start, end]."""
-    r = per_race[(per_race["year"] >= start) & (per_race["year"] <= end)]
+def select_period(per_race: pd.DataFrame, period) -> pd.DataFrame:
+    """Rows in a period: a (start, end) pair of seasons, or a set of seasons."""
+    if isinstance(period, (set, frozenset)):
+        return per_race[per_race["year"].isin(period)]
+    start, end = period
+    return per_race[(per_race["year"] >= start) & (per_race["year"] <= end)]
+
+
+def summarise_drivers(per_race: pd.DataFrame, period) -> dict:
+    """Pool per-race sums into mean scores for races in a period
+    (see ``select_period``)."""
+    r = select_period(per_race, period)
     if r.empty:
         return {}
     out = {"races": len(r)}
@@ -332,13 +344,14 @@ def summarise_drivers(per_race: pd.DataFrame, start: int, end: int) -> dict:
 
 
 def sweep_drivers(prepared: list[tuple], grid: dict[str, list],
-                  periods: dict[str, tuple[int, int]],
+                  periods: dict,
                   base: EloConfig = DEFAULT_CONFIG,
                   progress: bool = False) -> pd.DataFrame:
     """Grid-search driver settings; one row per (combo, period).
 
     ``grid`` maps each name in DRIVER_PARAMS to the values to try; missing
-    names stay at the current config value.
+    names stay at the current config value. ``periods`` maps a label to a
+    (start, end) pair or a set of seasons.
     """
     values = {**{k: [v] for k, v in driver_defaults(base).items()}, **grid}
     combos = [{}]
@@ -347,8 +360,8 @@ def sweep_drivers(prepared: list[tuple], grid: dict[str, list],
     rows = []
     for n, combo in enumerate(combos, 1):
         per_race = driver_backtest(prepared, driver_config(base, **combo))
-        for label, (start, end) in periods.items():
-            s = summarise_drivers(per_race, start, end)
+        for label, period in periods.items():
+            s = summarise_drivers(per_race, period)
             if s:
                 rows.append({**combo, "period": label, **s})
         if progress:
