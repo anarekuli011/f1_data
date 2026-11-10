@@ -84,12 +84,30 @@ class EloConfig:
     era_start_confidence_drop: float = 0.5
     k_driver_race_rookie: float = 112.0
     k_driver_race_veteran: float = 56.0
-    k_driver_quali_rookie: float = 96.0
-    k_driver_quali_veteran: float = 48.0
+    k_driver_quali_rookie: float = 120.0
+    k_driver_quali_veteran: float = 60.0
 
-    # How strongly a driver's result is discounted/boosted by the relative
-    # strength of the two constructors involved. Exponent on (rb / ra).
-    constructor_adjustment_exponent: float = 2.25
+    # Weight of the car in the driver expectation: driver A vs driver B is
+    # predicted from (D_a + driver_car_weight * C_a) vs
+    # (D_b + driver_car_weight * C_b), C = constructor rating. 0 = drivers
+    # only (the original behaviour, which lets car strength leak into driver
+    # ratings: a driver in a dominant car keeps gaining for wins the car
+    # earned). Teammate pairs are unaffected, since they share a car.
+    # Backtested on teammate pairs, 1990-2026: best around 0.875 (0.75-1
+    # effectively tied), with constructor_adjustment_exponent = 0.
+    driver_car_weight: float = 0.875
+
+    # True: the driver passes use the constructor ratings from BEFORE that
+    # session's constructor update (so the car rating doesn't yet contain the
+    # result being scored). False: the freshly updated ones (the engine's
+    # original order). Backtests can't tell them apart (within 0.0005).
+    driver_car_before_update: bool = False
+
+    # Older, cruder car correction: each driver update is multiplied by
+    # (C_b / C_a) ** exponent. Redundant once the car is in the expectation
+    # (driver_car_weight), and worse on every backtest when combined with it;
+    # 0 = off. Use 2.25 with driver_car_weight = 0 for the previous engine.
+    constructor_adjustment_exponent: float = 0.0
 
     # Driver race pass only: when a classified driver is compared with a
     # driver who did not finish (position == dnf_sentinel), both sides of

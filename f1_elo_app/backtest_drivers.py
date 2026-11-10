@@ -10,15 +10,27 @@ you can tune one or two at a time:
     --race-k MIN MAX        veteran (100% confidence) race K
     --quali-k MIN MAX       veteran quali K
     --rookie-ratio MIN MAX  rookie (0% confidence) K = ratio x veteran K,
-                            for both race and quali (now 64/48 = 1.33)
+                            for both race and quali (now 112/56 = 2)
     --exponent MIN MAX      constructor_adjustment_exponent
     --dnf-factor MIN MAX    driver_dnf_penalty_factor
     --confidence-drop MIN MAX
                             era_start_confidence_drop (0.5 = every driver
                             loses 50 points of confidence at a new era)
+    --car-weight MIN MAX    driver_car_weight (lam): the car's weight in the
+                            driver expectation, D + lam * C
+    --car-before-update 0 1 1 = driver passes see the car ratings from before
+                            that session's constructor update
 
 each with a matching --...-increment. The constructor settings are taken
 from the config as they are.
+
+Besides the usual teammate scores, every table shows the same scores for
+NEW teammate pairs (newrace / newquali: the first --new-races races, default
+8, after either driver moved team) and ``leak``, the correlation between
+driver and car ratings. New pairs are where car strength leaking into driver
+ratings hurts most, so check them when tuning --car-weight:
+
+    py backtest_drivers.py --car-weight 0 1 --exponent 0 2.25 --exponent-increment 2.25 --metric newrace_logloss
 
 --era-seasons adds a score over just the regulation-change seasons
 (1998, 2009, 2014, ...) pooled together, plus the season after each one --
@@ -68,7 +80,16 @@ OPTIONS = {
                    "driver DNF penalty factor"),
     "confidence_drop": ("--confidence-drop", "--confidence-drop-increment", 0.1,
                         "era-start driver confidence drop (0.5 = 50 points)"),
+    "car_weight": ("--car-weight", "--car-weight-increment", 0.25,
+                   "driver_car_weight (lam: car weight in the driver expectation)"),
+    "car_before_update": ("--car-before-update", "--car-before-update-increment", 1,
+                          "1 = driver passes use car ratings from before the "
+                          "session's constructor update, 0 = after"),
 }
+
+# Scores shown next to the chosen metric for every combination.
+SHOWN = ["race_logloss", "quali_logloss", "newrace_logloss", "newquali_logloss",
+         "leak"]
 
 
 def main() -> None:
@@ -89,10 +110,14 @@ def main() -> None:
                    help="Also score the regulation-change seasons since 1990 "
                         "pooled together, and the seasons right after them.")
     p.add_argument("--metric", default="race_logloss",
-                   choices=["race_logloss", "raceall_logloss", "quali_logloss",
-                            "race_brier", "raceall_brier", "quali_brier"],
+                   choices=[f"{s}_{m}" for m in ("logloss", "brier")
+                            for s in ("race", "raceall", "quali", "newrace", "newquali")],
                    help="race = teammates both classified (default); raceall = "
-                        "incl. DNFs as losses; quali = teammates by grid.")
+                        "incl. DNFs as losses; quali = teammates by grid; "
+                        "newrace / newquali = the same, new teammate pairs only.")
+    p.add_argument("--new-races", type=int, default=8,
+                   help="A teammate pair counts as new for this many races after "
+                        "either driver moved team (default 8).")
     args = p.parse_args()
 
     periods: dict[str, tuple[int, int]] = {}
@@ -138,14 +163,16 @@ def main() -> None:
 
     # The current config, as the baseline to beat.
     t0 = time.time()
-    base_run = driver_backtest(prepared, driver_config(config.DEFAULT_CONFIG, **current))
+    base_run = driver_backtest(prepared, driver_config(config.DEFAULT_CONFIG, **current),
+                               new_races=args.new_races)
     secs = time.time() - t0
     n_runs = 1
     for name in DRIVER_PARAMS:
         n_runs *= len(grid.get(name, [0]))
     print(f"Running {n_runs} backtests (about {secs:.0f} s each, "
           f"~{n_runs * secs / 60:.0f} min) ...")
-    res = sweep_drivers(prepared, grid, periods, progress=True)
+    res = sweep_drivers(prepared, grid, periods, progress=True,
+                        new_races=args.new_races)
 
     out = config.OUTPUT_DIR / "backtest_drivers.csv"
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -162,18 +189,23 @@ def main() -> None:
             continue
         best = r.loc[r[args.metric].idxmin()]
         print(f"=== {period}: {args.metric}, {int(best.races)} races, "
-              f"{int(best[pairs_col]):,} teammate pairs ===")
+              f"{int(best[pairs_col]):,} teammate pairs "
+              f"({int(best.newrace_pairs):,} new race / "
+              f"{int(best.newquali_pairs):,} new quali) ===")
         if len(varied) == 2:
             grid_tbl = r.pivot(index=varied[0], columns=varied[1], values=args.metric)
             print(f"(rows = {varied[0]}, columns = {varied[1]})")
             print(grid_tbl.round(4).to_string())
         cols = varied or list(DRIVER_PARAMS)
-        print("Top 10:")
-        print(r.nsmallest(10, args.metric)[cols + [args.metric, acc_col]]
+        shown = [args.metric] + [c for c in SHOWN if c != args.metric] + [acc_col]
+        print("Top 10 (leak = driver-vs-car rating correlation):")
+        print(r.nsmallest(10, args.metric)[cols + shown]
               .round(4).to_string(index=False))
 
-        cur = summarise_drivers(base_run, spec)[args.metric]
-        print(f"Current config:  {args.metric} {cur:.4f}")
+        cur_all = summarise_drivers(base_run, spec)
+        cur = cur_all[args.metric]
+        print("Current config:  " + "  ".join(
+            f"{c} {cur_all[c]:.4f}" for c in shown))
         desc = ", ".join(f"{k} {best[k]:g}" for k in (varied or DRIVER_PARAMS))
         print(f"Best:            {desc}  {args.metric} {best[args.metric]:.4f}  "
               f"accuracy {best[acc_col]:.3f}  (vs current {cur - best[args.metric]:+.4f})")
