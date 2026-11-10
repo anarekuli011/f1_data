@@ -76,6 +76,11 @@ class EloConfig:
     # race a driver misses (once they've started at least one) takes 1 away.
     # So a full season out (~20 races) brings a driver back to 0%.
     driver_confidence_races: int = 20
+    # At the first race of each season in regulation_change_years, every
+    # driver's confidence drops by this share of the full scale (0.5 = 50
+    # percentage points, i.e. 10 races' worth), never below 0%. New cars
+    # mean even veterans' ratings should move faster for a while.
+    era_start_confidence_drop: float = 0.5
     k_driver_race_rookie: float = 64.0
     k_driver_race_veteran: float = 48.0
     k_driver_quali_rookie: float = 16.0

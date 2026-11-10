@@ -23,7 +23,9 @@ a driver in a much stronger car gains less for a win and loses more for a loss.
 
 Driver K-factors depend on a confidence level (0-20 races' worth, 5% per
 race): rookie K at 0%, veteran K at 100%, linear in between. A classified
-finish adds a race of confidence; a DNF or a missed race takes one away.
+finish adds a race of confidence; a DNF or a missed race takes one away. At
+the first race of a regulation-change season, every driver loses
+``era_start_confidence_drop`` (50 percentage points) of confidence.
 """
 from __future__ import annotations
 
@@ -58,7 +60,10 @@ class EloEngine:
         # Driver confidence, in "races' worth" (0 .. driver_confidence_races).
         # Drives the rookie -> veteran K-factor slide. Only drivers who have
         # started at least one race are in here.
-        self.driver_confidence: dict[int, int] = {}
+        self.driver_confidence: dict[int, float] = {}
+
+        # Season of the last race processed, to spot the first race of a year.
+        self._last_year: int | None = None
 
         # True while processing a race early in a new regulation era.
         self.era_start = False
@@ -94,6 +99,12 @@ class EloEngine:
         else:
             rookie, veteran = c.k_driver_quali_rookie, c.k_driver_quali_veteran
         return rookie + (veteran - rookie) * conf
+
+    def _era_start_confidence_drop(self) -> None:
+        """New regulations: knock every driver's confidence down (floor 0)."""
+        drop = self.cfg.era_start_confidence_drop * self.cfg.driver_confidence_races
+        for d in self.driver_confidence:
+            self.driver_confidence[d] = max(0.0, self.driver_confidence[d] - drop)
 
     def _update_confidence(self, race: pd.DataFrame) -> None:
         """After a race: +1 for a classified finish, -1 for a DNF, and -1 for
@@ -251,8 +262,15 @@ class EloEngine:
         constructor / driver rating snapshots to write back.
         """
         cfg = self.cfg
-        self.era_start = self.in_era_start(int(race["year"].iloc[0]),
-                                           int(race["round"].iloc[0]))
+        year = int(race["year"].iloc[0])
+        self.era_start = self.in_era_start(year, int(race["round"].iloc[0]))
+
+        # First race of a regulation-change season: drop driver confidence
+        # before this race, so the higher K applies from round 1.
+        if year != self._last_year:
+            if year in cfg.regulation_change_years:
+                self._era_start_confidence_drop()
+            self._last_year = year
 
         # ----- QUALIFYING (low K), ordered by grid -----
         quali_order = self._order_by_grid(race, cfg.no_grid_sentinel)
