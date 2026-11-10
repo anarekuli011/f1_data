@@ -41,8 +41,8 @@ class EloConfig:
     initial_elo: float = 1000.0
 
     # K-factors for constructors.
-    k_constructor_race: float = 96.0
-    k_constructor_quali: float = 24.0
+    k_constructor_race: float = 52.0
+    k_constructor_quali: float = 18.0
 
     # Era-start boost for constructors. A big regulation change reshuffles
     # the order, so ratings need to move faster until they catch up. For the
@@ -65,8 +65,8 @@ class EloConfig:
     # nearly all the gain at the era start, with less carry-over into the
     # following season than boosting the whole year. 99 = whole season.
     era_start_races: int = 8
-    k_constructor_race_era_start: float | None = None
-    k_constructor_quali_era_start: float | None = None
+    k_constructor_race_era_start: float | None = 60.0
+    k_constructor_quali_era_start: float | None = 24.0
 
     # K-factors for drivers, split by experience.
     # "Rookie" = race_count <= driver_experience_threshold.
@@ -78,7 +78,7 @@ class EloConfig:
 
     # How strongly a driver's result is discounted/boosted by the relative
     # strength of the two constructors involved. Exponent on (rb / ra).
-    constructor_adjustment_exponent: float = 3.0
+    constructor_adjustment_exponent: float = 3.5
 
     # Driver race pass only: when a classified driver is compared with a
     # driver who did not finish (position == dnf_sentinel), both sides of
