@@ -51,9 +51,22 @@ class EloEngine:
         self.constructor_race_count: dict[int, int] = {}
         self.driver_race_count: dict[int, int] = {}
 
+        # True while processing a race early in a new regulation era.
+        self.era_start = False
+
     # -- K-factors ---------------------------------------------------------
+    def in_era_start(self, year: int, rnd: int) -> bool:
+        """Is this race inside the boosted start of a regulation era?"""
+        c = self.cfg
+        return year in c.regulation_change_years and rnd <= c.era_start_races
+
     def _k_constructor(self, is_race: bool) -> float:
         c = self.cfg
+        if self.era_start:
+            boost = (c.k_constructor_race_era_start if is_race
+                     else c.k_constructor_quali_era_start)
+            if boost is not None:
+                return boost
         return c.k_constructor_race if is_race else c.k_constructor_quali
 
     def _k_driver(self, race_count: int, is_race: bool) -> float:
@@ -199,6 +212,8 @@ class EloEngine:
         constructor / driver rating snapshots to write back.
         """
         cfg = self.cfg
+        self.era_start = self.in_era_start(int(race["year"].iloc[0]),
+                                           int(race["round"].iloc[0]))
 
         # ----- QUALIFYING (low K), ordered by grid -----
         quali_order = self._order_by_grid(race, cfg.no_grid_sentinel)

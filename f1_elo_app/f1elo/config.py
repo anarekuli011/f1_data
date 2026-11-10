@@ -44,6 +44,30 @@ class EloConfig:
     k_constructor_race: float = 96.0
     k_constructor_quali: float = 24.0
 
+    # Era-start boost for constructors. A big regulation change reshuffles
+    # the order, so ratings need to move faster until they catch up. For the
+    # first `era_start_races` rounds of each season in
+    # `regulation_change_years`, the constructor K-factors below replace the
+    # normal ones. None = no boost (use the normal K). Drivers are unaffected.
+    regulation_change_years: tuple[int, ...] = (
+        1961,  # 1.5 L engines
+        1966,  # 3.0 L engines
+        1983,  # flat bottoms, ground-effect ban
+        1989,  # turbo ban
+        1998,  # narrow track, grooved tyres
+        2009,  # aero overhaul, slicks, KERS
+        2014,  # turbo-hybrid power units
+        2017,  # wider cars and tyres
+        2022,  # ground-effect cars
+        2026,  # new power units and active aero
+    )
+    # Backtests (1990-2026) found boosting the first ~6-10 races works best:
+    # nearly all the gain at the era start, with less carry-over into the
+    # following season than boosting the whole year. 99 = whole season.
+    era_start_races: int = 8
+    k_constructor_race_era_start: float | None = None
+    k_constructor_quali_era_start: float | None = None
+
     # K-factors for drivers, split by experience.
     # "Rookie" = race_count <= driver_experience_threshold.
     driver_experience_threshold: int = 30

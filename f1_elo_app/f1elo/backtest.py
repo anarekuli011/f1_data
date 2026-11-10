@@ -43,7 +43,7 @@ from .elo_engine import EloEngine, expected_score
 def prepare_races(df: pd.DataFrame, cfg: EloConfig = DEFAULT_CONFIG) -> list[tuple]:
     """Pre-sort every race once so a parameter sweep doesn't redo it.
 
-    Returns a list of ``(raceId, year, quali_order, race_order)`` in
+    Returns a list of ``(raceId, year, round, quali_order, race_order)`` in
     chronological order.
     """
     prepared = []
@@ -54,6 +54,7 @@ def prepare_races(df: pd.DataFrame, cfg: EloConfig = DEFAULT_CONFIG) -> list[tup
         prepared.append((
             race_id,
             int(race["year"].iloc[0]),
+            int(race["round"].iloc[0]),
             quali[["constructorId", "grid"]].reset_index(drop=True),
             result[["constructorId", "position"]].reset_index(drop=True),
         ))
@@ -94,10 +95,11 @@ def constructor_backtest(prepared: list[tuple],
     init = cfg.initial_elo
     sentinel = cfg.dnf_sentinel
     rows = []
-    for race_id, year, quali, result in prepared:
+    for race_id, year, rnd, quali, result in prepared:
         for cid in result["constructorId"].unique():
             engine.constructor_elo.setdefault(cid, init)
             engine.highest_constructor.setdefault(cid, init)
+        engine.era_start = engine.in_era_start(year, rnd)
 
         ids = result["constructorId"].tolist()
         vals = result["position"].tolist()
@@ -133,18 +135,35 @@ def summarise(per_race: pd.DataFrame, start: int, end: int) -> dict:
 def sweep_constructor_k(prepared: list[tuple], race_ks, quali_ks,
                         periods: dict[str, tuple[int, int]],
                         base: EloConfig = DEFAULT_CONFIG,
-                        progress: bool = False) -> pd.DataFrame:
-    """Grid-search constructor K-factors; one row per (K pair, period)."""
+                        progress: bool = False,
+                        boost_race_ks=(None,), boost_quali_ks=(None,),
+                        boost_races: int | None = None) -> pd.DataFrame:
+    """Grid-search constructor K-factors; one row per (K combo, period).
+
+    ``boost_race_ks`` / ``boost_quali_ks`` are the era-start K values to try
+    (None = no boost for that pass); ``boost_races`` overrides
+    ``era_start_races``.
+    """
     rows = []
-    combos = [(kr, kq) for kr in race_ks for kq in quali_ks]
-    for n, (kr, kq) in enumerate(combos, 1):
-        cfg = replace(base, k_constructor_race=float(kr),
-                      k_constructor_quali=float(kq))
+    combos = [(kr, kq, br, bq) for kr in race_ks for kq in quali_ks
+              for br in boost_race_ks for bq in boost_quali_ks]
+    for n, (kr, kq, br, bq) in enumerate(combos, 1):
+        cfg = replace(
+            base, k_constructor_race=float(kr), k_constructor_quali=float(kq),
+            k_constructor_race_era_start=None if br is None else float(br),
+            k_constructor_quali_era_start=None if bq is None else float(bq),
+        )
+        if boost_races is not None:
+            cfg = replace(cfg, era_start_races=boost_races)
         per_race = constructor_backtest(prepared, cfg)
         for label, (start, end) in periods.items():
             s = summarise(per_race, start, end)
             if s:
-                rows.append({"k_race": kr, "k_quali": kq, "period": label, **s})
+                rows.append({"k_race": kr, "k_quali": kq,
+                             "boost_race": br, "boost_quali": bq,
+                             "period": label, **s})
         if progress:
-            print(f"  {n}/{len(combos)}  K race={kr:<5} K quali={kq:<5}", flush=True)
+            boost = "" if br is None and bq is None else f"  boost {br}/{bq}"
+            print(f"  {n}/{len(combos)}  K race={kr:<5} K quali={kq:<5}{boost}",
+                  flush=True)
     return pd.DataFrame(rows)
