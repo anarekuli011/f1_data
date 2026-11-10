@@ -1,44 +1,80 @@
 """Grid-search the constructor K-factors by backtesting.
 
-    py backtest_constructors.py
-    py backtest_constructors.py --race-k 48 64 80 96 --quali-k 0 12 24
+    py backtest_constructors.py                    # last 5 seasons (default)
+    py backtest_constructors.py --last 3           # last 3 seasons
+    py backtest_constructors.py --period 2015-2026 --period 1979-2014
+    py backtest_constructors.py --race-k 40 48 56 --quali-k 10 12 14
 
-For every (race K, qualifying K) pair it replays all races, predicting each
-race from the ratings *before* that race, and reports the pairwise log loss
-(lower is better; 0.6931 = coin flip). See f1elo/backtest.py for details.
+For every (race K, qualifying K) pair it replays ALL races from 1950 (so the
+ratings are properly warmed up), but only scores the races inside each
+evaluation period: each one is predicted from the ratings *before* that race,
+and the pairwise log loss is reported (lower is better; 0.6931 = coin flip).
+See f1elo/backtest.py for details.
+
+The intended workflow: after each season, rerun this with the default
+(last 5 seasons) and copy the suggested K-factors into f1elo/config.py.
 
 Writes the full results to output/backtest_constructors.csv.
 """
 from __future__ import annotations
 
 import argparse
+import re
 
 import pandas as pd
 
 from f1elo import build_race_frame, config
 from f1elo.backtest import prepare_races, sweep_constructor_k
 
-PERIODS = {
-    "1960-2026": (1960, 2026),   # everything after a 10-season warm-up
-    "1979-2014": (1979, 2014),   # the Bell et al. window
-    "2015-2026": (2015, 2026),   # recent era
-}
+# Scores within this much of the best are treated as a tie: on a few seasons
+# of data, differences this small are noise, not a real preference.
+NEAR_BEST = 0.0005
+
+
+def parse_period(text: str) -> tuple[str, tuple[int, int]]:
+    """'2015-2026' -> ('2015-2026', (2015, 2026)); '2024' -> one season."""
+    m = re.fullmatch(r"\s*(\d{4})\s*(?:-\s*(\d{4}))?\s*", text)
+    if not m:
+        raise argparse.ArgumentTypeError(
+            f"period must look like 2015-2026 or 2024, got {text!r}")
+    start = int(m.group(1))
+    end = int(m.group(2) or start)
+    if end < start:
+        raise argparse.ArgumentTypeError(f"period {text!r} ends before it starts")
+    return f"{start}-{end}", (start, end)
 
 
 def main() -> None:
     p = argparse.ArgumentParser(description="Backtest constructor K-factors.")
+    p.add_argument("--period", type=parse_period, action="append",
+                   help="Seasons to score, e.g. 2015-2026 or 2024. Repeatable.")
+    p.add_argument("--last", type=int, default=None,
+                   help="Score the last N seasons in the data (default 5 if no "
+                        "--period is given). Includes the current, possibly "
+                        "unfinished, season.")
     p.add_argument("--race-k", type=float, nargs="+",
-                   default=[16, 24, 32, 48, 64, 80, 96, 128, 160, 192, 256])
+                   default=[16, 24, 32, 40, 48, 56, 64, 80, 96, 128, 160, 192, 256])
     p.add_argument("--quali-k", type=float, nargs="+",
-                   default=[0, 6, 12, 24, 48])
+                   default=[0, 4, 8, 12, 16, 20, 24, 32, 48])
     p.add_argument("--metric", default="pre_logloss",
-                   choices=["pre_logloss", "postq_logloss", "pre_brier", "postq_brier"])
+                   choices=["pre_logloss", "postq_logloss", "pre_brier", "postq_brier"],
+                   help="pre_* = predict before the weekend, "
+                        "postq_* = predict after qualifying.")
     args = p.parse_args()
 
     print("Preparing races ...")
     prepared = prepare_races(build_race_frame())
+    latest = max(year for _, year, _, _ in prepared)
+
+    periods: dict[str, tuple[int, int]] = dict(args.period or [])
+    if args.last is not None or not periods:
+        n = args.last or 5
+        start = latest - n + 1
+        periods[f"last {n} ({start}-{latest})"] = (start, latest)
+
+    print(f"Scoring periods: {', '.join(periods)}")
     print(f"Running {len(args.race_k) * len(args.quali_k)} backtests ...")
-    res = sweep_constructor_k(prepared, args.race_k, args.quali_k, PERIODS,
+    res = sweep_constructor_k(prepared, args.race_k, args.quali_k, periods,
                               progress=True)
 
     out = config.OUTPUT_DIR / "backtest_constructors.csv"
@@ -46,16 +82,24 @@ def main() -> None:
     res.to_csv(out, index=False)
     print(f"Wrote {out}\n")
 
+    acc_col = args.metric.split("_")[0] + "_acc"
     pd.set_option("display.width", 200)
-    for period in PERIODS:
+    for period in periods:
         r = res[res["period"] == period]
+        if r.empty:
+            print(f"=== {period}: no races in the data ===\n")
+            continue
         grid = r.pivot(index="k_race", columns="k_quali", values=args.metric)
         best = r.loc[r[args.metric].idxmin()]
-        print(f"=== {period}: {args.metric} (rows = race K, columns = quali K) ===")
+        near = r[r[args.metric] <= best[args.metric] + NEAR_BEST]
+        print(f"=== {period}: {args.metric}, {int(best.races)} races, "
+              f"{int(best.pairs):,} pairs (rows = race K, columns = quali K) ===")
         print(grid.round(4).to_string())
         print(f"Best: race K {best.k_race:g}, quali K {best.k_quali:g}  "
-              f"{args.metric} {best[args.metric]:.4f}  "
-              f"accuracy {best[args.metric.split('_')[0] + '_acc']:.3f}\n")
+              f"{args.metric} {best[args.metric]:.4f}  accuracy {best[acc_col]:.3f}")
+        print(f"Within {NEAR_BEST} of best (effectively tied): "
+              f"race K {near.k_race.min():g}-{near.k_race.max():g}, "
+              f"quali K {near.k_quali.min():g}-{near.k_quali.max():g}\n")
 
 
 if __name__ == "__main__":
