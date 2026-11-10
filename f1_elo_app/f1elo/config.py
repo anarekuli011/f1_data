@@ -82,14 +82,14 @@ class EloConfig:
     # percentage points, i.e. 10 races' worth), never below 0%. New cars
     # mean even veterans' ratings should move faster for a while.
     era_start_confidence_drop: float = 0.5
-    k_driver_race_rookie: float = 64.0
-    k_driver_race_veteran: float = 48.0
-    k_driver_quali_rookie: float = 16.0
-    k_driver_quali_veteran: float = 12.0
+    k_driver_race_rookie: float = 112.0
+    k_driver_race_veteran: float = 56.0
+    k_driver_quali_rookie: float = 96.0
+    k_driver_quali_veteran: float = 48.0
 
     # How strongly a driver's result is discounted/boosted by the relative
     # strength of the two constructors involved. Exponent on (rb / ra).
-    constructor_adjustment_exponent: float = 3.5
+    constructor_adjustment_exponent: float = 2.25
 
     # Driver race pass only: when a classified driver is compared with a
     # driver who did not finish (position == dnf_sentinel), both sides of
@@ -98,7 +98,7 @@ class EloConfig:
     # rating is created or destroyed. Constructors still take the full
     # penalty (reliability is part of car strength); qualifying is
     # unaffected. 1.0 reproduces the original "DNF = last" behaviour.
-    driver_dnf_penalty_factor: float = 0.5
+    driver_dnf_penalty_factor: float = 0.25
 
     # Standard ELO logistic scale (the "400" in the classic formula).
     elo_scale: float = 400.0
