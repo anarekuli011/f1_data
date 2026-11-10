@@ -149,7 +149,7 @@ def constructor_backtest(prepared: list[tuple],
         for cid in result["constructorId"].unique():
             engine.constructor_elo.setdefault(cid, init)
             engine.highest_constructor.setdefault(cid, init)
-        engine.era_start = engine.in_era_start(year, rnd)
+        engine.era_conf = engine.era_confidence(year, rnd)
 
         ids = result["constructorId"].tolist()
         vals = result["position"].tolist()

@@ -65,23 +65,29 @@ class EloEngine:
         # Season of the last race processed, to spot the first race of a year.
         self._last_year: int | None = None
 
-        # True while processing a race early in a new regulation era.
-        self.era_start = False
+        # Era confidence for the race being processed: 0.0 at the first race
+        # of a regulation-change season, 1.0 once the era has settled.
+        self.era_conf = 1.0
 
     # -- K-factors ---------------------------------------------------------
-    def in_era_start(self, year: int, rnd: int) -> bool:
-        """Is this race inside the boosted start of a regulation era?"""
+    def era_confidence(self, year: int, rnd: int) -> float:
+        """0.0 at round 1 of a regulation-change season, rising by
+        1/era_start_races per race already run, capped at 1.0. Any other
+        season is 1.0 (settled)."""
         c = self.cfg
-        return year in c.regulation_change_years and rnd <= c.era_start_races
+        if year not in c.regulation_change_years or c.era_start_races <= 0:
+            return 1.0
+        return min(1.0, (rnd - 1) / c.era_start_races)
 
     def _k_constructor(self, is_race: bool) -> float:
+        """Slide from the era-start K (0% era confidence) to the normal K."""
         c = self.cfg
-        if self.era_start:
-            boost = (c.k_constructor_race_era_start if is_race
-                     else c.k_constructor_quali_era_start)
-            if boost is not None:
-                return boost
-        return c.k_constructor_race if is_race else c.k_constructor_quali
+        normal = c.k_constructor_race if is_race else c.k_constructor_quali
+        boost = (c.k_constructor_race_era_start if is_race
+                 else c.k_constructor_quali_era_start)
+        if boost is None or self.era_conf >= 1.0:
+            return normal
+        return boost + (normal - boost) * self.era_conf
 
     def confidence_pct(self, driver_id) -> float:
         """Driver confidence as a fraction: 0.0 (none) to 1.0 (full)."""
@@ -278,7 +284,7 @@ class EloEngine:
         Backtests call this directly so they share the exact same logic.
         """
         cfg = self.cfg
-        self.era_start = self.in_era_start(year, rnd)
+        self.era_conf = self.era_confidence(year, rnd)
 
         # First race of a regulation-change season: drop driver confidence
         # before this race, so the higher K applies from round 1.

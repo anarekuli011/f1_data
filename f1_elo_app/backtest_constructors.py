@@ -163,7 +163,8 @@ def main() -> None:
                        help="Step between era-start quali K values. Default 4.")
     boost.add_argument("--boost-races", type=int, default=None,
                        help="How many races at the start of each new era get "
-                            "the boost (default: era_start_races in config, 8).")
+                            "the boost, fading linearly to the normal K "
+                            "(default: era_start_races in config, 10).")
     p.add_argument("--metric", default="pre_logloss",
                    choices=["pre_logloss", "postq_logloss", "pre_brier", "postq_brier"],
                    help="pre_* = predict before the weekend, "
