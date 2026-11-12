@@ -9,8 +9,8 @@ How it works, per race:
   2. RACE pass, ordered by finishing position ("\\N" = DNF = last).
      - Update constructor ratings (high K), then driver ratings (high K).
      - Drivers only: a classified-vs-DNF pair is scaled by
-       ``driver_dnf_penalty_factor`` (default 0.5), so a retirement costs
-       the driver half as much. Constructors take the full penalty.
+       ``driver_dnf_penalty_factor`` (default 0.25), so a retirement costs
+       the driver a quarter as much. Constructors take the full penalty.
 
 Within each pass it does a full pairwise comparison: every entry is treated as
 having "beaten" every entry classified below it (score 1 vs 0). The per-entry
@@ -18,8 +18,15 @@ ELO deltas are accumulated across all pairs, then divided by the size of the
 field before being applied -- so a single race moves a rating by roughly one
 K-step, not N of them.
 
-Driver updates are additionally scaled by a constructor-strength adjustment:
-a driver in a much stronger car gains less for a win and loses more for a loss.
+Driver pairs are predicted from driver AND car strength: the expected result
+of driver A vs driver B is ``expected_score(D_a + lam*C_a, D_b + lam*C_b)``,
+with D the driver ratings, C the constructor ratings and lam
+``driver_car_weight``. A driver in a dominant car is then expected to beat
+midfield drivers and gains little for doing it; their rating only rises for
+results better than the car explains, which keeps car strength from leaking
+into the driver rating. Teammates share C, so for them only D matters.
+Updates can also be scaled by ``(C_b / C_a) ** constructor_adjustment_exponent``
+(an older, cruder way to discount wins in a better car; 0 turns it off).
 
 Driver K-factors depend on a confidence level (0-20 races' worth, 5% per
 race): rookie K at 0%, veteran K at 100%, linear in between. A classified
@@ -197,9 +204,16 @@ class EloEngine:
         self._apply(self.constructor_elo, changes, n)
 
     def _driver_pass(self, order: pd.DataFrame, col: str, sentinel,
-                     is_race: bool) -> None:
-        """One full pairwise driver update, scaled by constructor strength."""
+                     is_race: bool, car_elo: dict | None = None) -> None:
+        """One full pairwise driver update, with the car in the expectation.
+
+        ``car_elo`` is the constructor rating table to use for the cars
+        (default: the current one).
+        """
         cfg = self.cfg
+        car_elo = self.constructor_elo if car_elo is None else car_elo
+        lam = cfg.driver_car_weight
+        exponent = cfg.constructor_adjustment_exponent
         driver_ids = order["driverId"].tolist()
         constructor_ids = order["constructorId"].tolist()
         vals = order[col].tolist()
@@ -215,17 +229,21 @@ class EloEngine:
                 if a == b:
                     continue
                 ra, rb = self.driver_elo[a], self.driver_elo[b]
-                con_ra = self.constructor_elo[ca]
-                con_rb = self.constructor_elo[cb]
+                con_ra = car_elo[ca]
+                con_rb = car_elo[cb]
 
                 k_a = self._k_driver(a, is_race)
                 k_b = self._k_driver(b, is_race)
-                ea = expected_score(ra, rb, cfg.elo_scale)
+                # Expected result from driver + weighted car strength, so a
+                # win the car explains earns little (teammates: same car).
+                ea = expected_score(ra + lam * con_ra, rb + lam * con_rb,
+                                    cfg.elo_scale)
                 eb = 1.0 - ea
 
-                # Better car -> smaller reward for the win (and vice versa).
-                adj = ((con_rb / con_ra) if con_ra != 0 else 1.0) ** \
-                    cfg.constructor_adjustment_exponent
+                # Optional extra discount: better car -> smaller reward for
+                # the win (and vice versa). Exponent 0 -> adj = 1.
+                adj = (1.0 if exponent == 0 or con_ra == 0
+                       else (con_rb / con_ra) ** exponent)
 
                 # Classified driver vs a DNF in the race: soften the pair
                 # (the car may have failed). Applied to both sides so the
@@ -293,13 +311,22 @@ class EloEngine:
                 self._era_start_confidence_drop()
             self._last_year = year
 
+        # Which car ratings the driver passes see: the ones from before this
+        # session's constructor update (the session's own result not yet in
+        # them), or the freshly updated ones.
+        snap = dict if cfg.driver_car_before_update else (lambda d: None)
+
         # ----- QUALIFYING (low K), ordered by grid -----
+        cars = snap(self.constructor_elo)
         self._constructor_pass(quali_order, "grid", cfg.no_grid_sentinel, is_race=False)
-        self._driver_pass(quali_order, "grid", cfg.no_grid_sentinel, is_race=False)
+        self._driver_pass(quali_order, "grid", cfg.no_grid_sentinel, is_race=False,
+                          car_elo=cars)
 
         # ----- RACE (high K), ordered by finishing position -----
+        cars = snap(self.constructor_elo)
         self._constructor_pass(race_order, "position", cfg.dnf_sentinel, is_race=True)
-        self._driver_pass(race_order, "position", cfg.dnf_sentinel, is_race=True)
+        self._driver_pass(race_order, "position", cfg.dnf_sentinel, is_race=True,
+                          car_elo=cars)
 
         # Confidence changes only after the whole weekend, so it affects the
         # NEXT race's K-factors.

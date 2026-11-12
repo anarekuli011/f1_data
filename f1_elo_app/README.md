@@ -87,9 +87,12 @@ For each race, in chronological order:
 
 Each pass does a full pairwise comparison — every entry "beats" everyone
 classified below it. Deltas are summed per entity and divided by the field size
-before being applied. Driver updates are scaled by a constructor-strength
-adjustment, so a strong car earns its driver less for a win and costs more for
-a loss. All K-factors and the adjustment exponent live in `config.py`.
+before being applied. For drivers, the expected result of a pair includes the
+car: driver A vs driver B is predicted from `D_a + lam*C_a` vs `D_b + lam*C_b`
+(driver plus weighted constructor rating, `driver_car_weight` = 0.875). A win
+the car explains earns little, so car strength doesn't leak into driver
+ratings; teammates share a car, so for them only the drivers count. All
+K-factors and the car weight live in `config.py`.
 
 ## Notes vs. the original notebook
 

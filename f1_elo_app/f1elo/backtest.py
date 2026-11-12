@@ -39,6 +39,18 @@ ratings measure skill rather than car strength. Three scores per race:
                    without mechanical DNFs adding noise).
   * ``raceall`` -- all teammate pairs, a DNF counting as a loss.
   * ``quali``   -- teammates by grid position (both with a grid slot).
+
+The race and quali scores are also kept for NEW teammate pairs only
+(``newrace`` / ``newquali``): races in the first ``new_races`` (default 8)
+after either driver moved from another team. Those pairings have never been
+compared head to head, so their ratings were earned against other teammates
+in other cars; car strength leaked into a driver rating shows up here.
+(A renamed team, e.g. Toro Rosso -> AlphaTauri, counts as a move.)
+
+``leak`` is the correlation between driver rating and car (constructor)
+rating over every entry in the period, before each race. Part of it is real
+(top teams hire top drivers), part is car strength leaking in; lower at equal
+teammate scores means less leak.
 """
 from __future__ import annotations
 
@@ -224,7 +236,10 @@ def sweep_constructor_k(prepared: list[tuple], race_ks, quali_ks,
 # ---------------------------------------------------------------------------
 # The driver settings a sweep can vary, in the order they're reported.
 DRIVER_PARAMS = ("race_k", "quali_k", "rookie_ratio", "exponent", "dnf_factor",
-                 "confidence_drop")
+                 "confidence_drop", "car_weight", "car_before_update")
+
+# Teammate comparisons scored by driver_backtest.
+DRIVER_SCORES = ("race", "raceall", "quali", "newrace", "newquali")
 
 
 def driver_defaults(cfg: EloConfig = DEFAULT_CONFIG) -> dict[str, float]:
@@ -236,12 +251,15 @@ def driver_defaults(cfg: EloConfig = DEFAULT_CONFIG) -> dict[str, float]:
         "exponent": cfg.constructor_adjustment_exponent,
         "dnf_factor": cfg.driver_dnf_penalty_factor,
         "confidence_drop": cfg.era_start_confidence_drop,
+        "car_weight": cfg.driver_car_weight,
+        "car_before_update": int(cfg.driver_car_before_update),
     }
 
 
 def driver_config(base: EloConfig, race_k: float, quali_k: float,
                   rookie_ratio: float, exponent: float,
-                  dnf_factor: float, confidence_drop: float) -> EloConfig:
+                  dnf_factor: float, confidence_drop: float,
+                  car_weight: float, car_before_update: float) -> EloConfig:
     """Build a config from sweep parameters.
 
     race_k / quali_k are the VETERAN (100% confidence) K-factors; the rookie
@@ -256,12 +274,18 @@ def driver_config(base: EloConfig, race_k: float, quali_k: float,
         constructor_adjustment_exponent=float(exponent),
         driver_dnf_penalty_factor=float(dnf_factor),
         era_start_confidence_drop=float(confidence_drop),
+        driver_car_weight=float(car_weight),
+        driver_car_before_update=bool(car_before_update),
     )
 
 
 def _score_teammates(ratings: dict, drivers: list, teams: list, vals: list,
-                     skip, scale: float):
-    """Score teammate pairs (i is ahead of j) against the current ratings."""
+                     skip, scale: float, only=None):
+    """Score teammate pairs (i is ahead of j) against the current ratings.
+
+    ``only``: if given, a set of drivers; a pair counts only if at least one
+    of the two is in it.
+    """
     n_pairs = 0
     logloss = brier = correct = 0.0
     n = len(drivers)
@@ -270,6 +294,8 @@ def _score_teammates(ratings: dict, drivers: list, teams: list, vals: list,
         for j in range(i + 1, n):
             b, tb, vb = drivers[j], teams[j], vals[j]
             if ta != tb or a == b or skip(va, vb):
+                continue
+            if only is not None and a not in only and b not in only:
                 continue
             p = expected_score(ratings[a], ratings[b], scale)
             p = min(max(p, 1e-12), 1 - 1e-12)
@@ -280,42 +306,78 @@ def _score_teammates(ratings: dict, drivers: list, teams: list, vals: list,
     return n_pairs, logloss, brier, correct
 
 
-def driver_backtest(prepared: list[tuple],
-                    cfg: EloConfig = DEFAULT_CONFIG) -> pd.DataFrame:
+def driver_backtest(prepared: list[tuple], cfg: EloConfig = DEFAULT_CONFIG,
+                    new_races: int = 8) -> pd.DataFrame:
     """Run the full engine over every race, scoring teammate pairs first.
 
-    Returns one row per race with pair counts and summed scores for the
-    ``race``, ``raceall`` and ``quali`` teammate comparisons.
+    Returns one row per race with pair counts and summed scores for each
+    comparison in DRIVER_SCORES, plus sums for the driver-vs-car rating
+    correlation (``leak``). ``new_races``: for how many races after a team
+    move a teammate pair counts as new.
     """
     engine = EloEngine(cfg)
     init = cfg.initial_elo
     dnf, no_grid, scale = cfg.dnf_sentinel, cfg.no_grid_sentinel, cfg.elo_scale
-    skips = {
-        "race": lambda va, vb: va == dnf or vb == dnf,
-        "raceall": lambda va, vb: va == dnf and vb == dnf,
-        "quali": lambda va, vb: va == no_grid or vb == no_grid,
-    }
+    classified = lambda va, vb: va == dnf or vb == dnf
+    on_grid = lambda va, vb: va == no_grid or vb == no_grid
+    scores = (  # name, frame, column, skip rule, new teammate pairs only
+        ("race", "result", "position", classified, False),
+        ("raceall", "result", "position", lambda va, vb: va == dnf and vb == dnf, False),
+        ("quali", "quali", "grid", on_grid, False),
+        ("newrace", "result", "position", classified, True),
+        ("newquali", "quali", "grid", on_grid, True),
+    )
+    # Per driver: current team, races with it, and whether they ever moved.
+    team: dict = {}
+    stint: dict = {}
+    moved: dict = {}
     rows = []
     for race_id, year, rnd, quali, result in prepared:
-        for d, c in zip(result["driverId"], result["constructorId"]):
+        entries = list(zip(result["driverId"], result["constructorId"]))
+        for d, c in entries:
             engine.driver_elo.setdefault(d, init)
             engine.highest_driver.setdefault(d, init)
             engine.constructor_elo.setdefault(c, init)
             engine.highest_constructor.setdefault(c, init)
 
+        # Drivers in their first new_races with a team they moved to.
+        new = {d for d, c in entries
+               if (d in team and team[d] != c)
+               or (moved.get(d) and stint[d] < new_races)}
+
         row = {"raceId": race_id, "year": year}
-        for name, frame, col in (("race", result, "position"),
-                                 ("raceall", result, "position"),
-                                 ("quali", quali, "grid")):
+        frames = {"result": result, "quali": quali}
+        for name, frame, col, skip, only_new in scores:
+            f = frames[frame]
             n, ll, br, co = _score_teammates(
-                engine.driver_elo, frame["driverId"].tolist(),
-                frame["constructorId"].tolist(), frame[col].tolist(),
-                skips[name], scale)
+                engine.driver_elo, f["driverId"].tolist(),
+                f["constructorId"].tolist(), f[col].tolist(),
+                skip, scale, only=new if only_new else None)
             row.update({f"{name}_pairs": n, f"{name}_logloss": ll,
                         f"{name}_brier": br, f"{name}_correct": co})
+
+        # Driver vs car rating before the race (sums, for a pooled corr).
+        ds = [engine.driver_elo[d] for d, _ in entries]
+        cs = [engine.constructor_elo[c] for _, c in entries]
+        row.update({
+            "leak_n": len(ds), "leak_d": sum(ds), "leak_c": sum(cs),
+            "leak_dd": sum(x * x for x in ds), "leak_cc": sum(x * x for x in cs),
+            "leak_dc": sum(x * y for x, y in zip(ds, cs)),
+        })
         rows.append(row)
 
         engine.process_ordered(year, rnd, quali, result)
+
+        seen = set()
+        for d, c in entries:
+            if d in seen:      # 1950s shared drives: count the race once
+                continue
+            seen.add(d)
+            if d in team and team[d] != c:
+                moved[d] = True
+                stint[d] = 0
+            team[d] = c
+            stint[d] = stint.get(d, 0) + 1
     return pd.DataFrame(rows)
 
 
@@ -334,19 +396,32 @@ def summarise_drivers(per_race: pd.DataFrame, period) -> dict:
     if r.empty:
         return {}
     out = {"races": len(r)}
-    for name in ("race", "raceall", "quali"):
+    for name in DRIVER_SCORES:
         n = r[f"{name}_pairs"].sum()
         out[f"{name}_pairs"] = int(n)
         for stat in ("logloss", "brier"):
             out[f"{name}_{stat}"] = r[f"{name}_{stat}"].sum() / n if n else float("nan")
         out[f"{name}_acc"] = r[f"{name}_correct"].sum() / n if n else float("nan")
+    out["leak"] = _pooled_corr(r)
     return out
+
+
+def _pooled_corr(r: pd.DataFrame) -> float:
+    """Driver-vs-car rating correlation from the per-race leak_* sums."""
+    n = r["leak_n"].sum()
+    md, mc = r["leak_d"].sum() / n, r["leak_c"].sum() / n
+    cov = r["leak_dc"].sum() / n - md * mc
+    var_d = r["leak_dd"].sum() / n - md * md
+    var_c = r["leak_cc"].sum() / n - mc * mc
+    if var_d <= 0 or var_c <= 0:
+        return float("nan")
+    return cov / math.sqrt(var_d * var_c)
 
 
 def sweep_drivers(prepared: list[tuple], grid: dict[str, list],
                   periods: dict,
                   base: EloConfig = DEFAULT_CONFIG,
-                  progress: bool = False) -> pd.DataFrame:
+                  progress: bool = False, new_races: int = 8) -> pd.DataFrame:
     """Grid-search driver settings; one row per (combo, period).
 
     ``grid`` maps each name in DRIVER_PARAMS to the values to try; missing
@@ -359,7 +434,8 @@ def sweep_drivers(prepared: list[tuple], grid: dict[str, list],
         combos = [{**c, name: v} for c in combos for v in values[name]]
     rows = []
     for n, combo in enumerate(combos, 1):
-        per_race = driver_backtest(prepared, driver_config(base, **combo))
+        per_race = driver_backtest(prepared, driver_config(base, **combo),
+                                   new_races=new_races)
         for label, period in periods.items():
             s = summarise_drivers(per_race, period)
             if s:
