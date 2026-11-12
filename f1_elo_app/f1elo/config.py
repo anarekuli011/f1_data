@@ -118,6 +118,16 @@ class EloConfig:
     # unaffected. 1.0 reproduces the original "DNF = last" behaviour.
     driver_dnf_penalty_factor: float = 0.25
 
+    # Field-size correction, for every pass (drivers and constructors,
+    # qualifying and race). Each entry's summed pair deltas are averaged
+    # over its n - 1 opponents, then scaled by (ref - 1) / ref, so a race
+    # moves ratings by the same amount whatever the grid size, and exactly
+    # as much as before on a grid of this many cars (K keeps its meaning).
+    # Without it, deltas are divided by the number of cars n, i.e. scaled
+    # by (n - 1) / n: a 10-car race moved ratings 5% less than a 20-car one.
+    # None = no correction (the original divide-by-n).
+    reference_field_size: int | None = 20
+
     # Standard ELO logistic scale (the "400" in the classic formula).
     elo_scale: float = 400.0
 

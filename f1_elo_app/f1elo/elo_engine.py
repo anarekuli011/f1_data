@@ -14,9 +14,13 @@ How it works, per race:
 
 Within each pass it does a full pairwise comparison: every entry is treated as
 having "beaten" every entry classified below it (score 1 vs 0). The per-entry
-ELO deltas are accumulated across all pairs, then divided by the size of the
-field before being applied -- so a single race moves a rating by roughly one
-K-step, not N of them.
+ELO deltas are accumulated across all pairs, then averaged over the n - 1
+opponents and scaled by (ref - 1) / ref, with ref = ``reference_field_size``
+(20) -- so a single race moves a rating by roughly one K-step, not N of them,
+and by the same amount on any grid size (exactly as before on 20 cars).
+With ``reference_field_size = None`` the deltas are divided by n instead,
+the original behaviour, which moved ratings 5% less on a 10-car grid than on
+a 20-car one.
 
 Driver pairs are predicted from driver AND car strength: the expected result
 of driver A vs driver B is ``expected_score(D_a + lam*C_a, D_b + lam*C_b)``,
@@ -159,13 +163,28 @@ class EloEngine:
         highest[a] = max(highest[a], new_ra)
         highest[b] = max(highest[b], new_rb)
 
-    @staticmethod
-    def _apply(ratings: dict, changes: dict, field_size: int) -> None:
-        """Apply accumulated deltas, normalised by the size of the field."""
+    def _field_divisor(self, field_size: int) -> float:
+        """What a pass's summed deltas are divided by.
+
+        With ``reference_field_size`` set: (n - 1) * ref / (ref - 1), i.e. the
+        average over the n - 1 opponents, scaled by (ref - 1) / ref. That is
+        exactly n on a reference-size grid, so K keeps its meaning there,
+        and the size of the field no longer changes how far a rating moves.
+        Without it: n, the original behaviour.
+        """
+        ref = self.cfg.reference_field_size
+        if ref is None or ref < 2 or field_size < 2:
+            return float(field_size)
+        return (field_size - 1) * ref / (ref - 1)
+
+    def _apply(self, ratings: dict, changes: dict, field_size: int) -> None:
+        """Apply accumulated deltas, normalised by the size of the field
+        (see ``_field_divisor``)."""
         if field_size == 0:
             return
+        divisor = self._field_divisor(field_size)
         for entity_id, delta in changes.items():
-            ratings[entity_id] = ratings.get(entity_id, 0.0) + delta / field_size
+            ratings[entity_id] = ratings.get(entity_id, 0.0) + delta / divisor
 
     # -- pairwise passes ---------------------------------------------------
     def _constructor_pass(self, order: pd.DataFrame, col: str, sentinel,

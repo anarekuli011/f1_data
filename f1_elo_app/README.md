@@ -86,8 +86,10 @@ For each race, in chronological order:
    (`\N` = DNF = last).
 
 Each pass does a full pairwise comparison — every entry "beats" everyone
-classified below it. Deltas are summed per entity and divided by the field size
-before being applied. For drivers, the expected result of a pair includes the
+classified below it. Deltas are summed per entity, averaged over its n − 1
+opponents and scaled by 19/20 (`reference_field_size` = 20), so a race moves a
+rating by the same amount whatever the grid size, and exactly as much as the
+original divide-by-n on a 20-car grid. For drivers, the expected result of a pair includes the
 car: driver A vs driver B is predicted from `D_a + lam*C_a` vs `D_b + lam*C_b`
 (driver plus weighted constructor rating, `driver_car_weight` = 0.875). A win
 the car explains earns little, so car strength doesn't leak into driver
