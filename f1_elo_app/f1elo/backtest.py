@@ -38,7 +38,9 @@ ratings measure skill rather than car strength. Three scores per race:
   * ``race``    -- teammates both classified (the main score: who was faster,
                    without mechanical DNFs adding noise).
   * ``raceall`` -- all teammate pairs, a DNF counting as a loss.
-  * ``quali``   -- teammates by grid position (both with a grid slot).
+  * ``quali``   -- teammates by qualifying position (both with a time): the
+                   real qualifying result from 1994 on, the grid before
+                   (as in the engine's qualifying pass).
 
 The race and quali scores are also kept for NEW teammate pairs only
 (``newrace`` / ``newquali``): races in the first ``new_races`` (default 8)
@@ -146,18 +148,19 @@ def prepare_races(df: pd.DataFrame, cfg: EloConfig = DEFAULT_CONFIG) -> list[tup
     """Pre-sort every race once so a parameter sweep doesn't redo it.
 
     Returns a list of ``(raceId, year, round, quali_order, race_order)`` in
-    chronological order.
+    chronological order. The qualifying order follows ``cfg`` (real
+    qualifying result or grid; see ``EloEngine._order_by_quali``).
     """
     prepared = []
     for race_id in df["raceId"].unique():
         race = df[df["raceId"] == race_id]
-        quali = EloEngine._order_by_grid(race, cfg.no_grid_sentinel)
+        quali = EloEngine._order_by_quali(race, cfg)
         result = EloEngine._order_by_position(race)
         prepared.append((
             race_id,
             int(race["year"].iloc[0]),
             int(race["round"].iloc[0]),
-            quali[["driverId", "constructorId", "grid"]].reset_index(drop=True),
+            quali[["driverId", "constructorId", "quali_rank"]].reset_index(drop=True),
             result[["driverId", "constructorId", "position"]].reset_index(drop=True),
         ))
     return prepared
@@ -207,7 +210,7 @@ def constructor_backtest(prepared: list[tuple],
         vals = result["position"].tolist()
 
         pre = _score_race(engine.constructor_elo, ids, vals, sentinel, cfg.elo_scale)
-        engine._constructor_pass(quali, "grid", cfg.no_grid_sentinel, is_race=False)
+        engine._constructor_pass(quali, "quali_rank", cfg.no_grid_sentinel, is_race=False)
         post_q = _score_race(engine.constructor_elo, ids, vals, sentinel, cfg.elo_scale)
         engine._constructor_pass(result, "position", sentinel, is_race=True)
 
@@ -379,9 +382,9 @@ def driver_backtest(prepared: list[tuple], cfg: EloConfig = DEFAULT_CONFIG,
     scores = (  # name, frame, column, skip rule, new teammate pairs only
         ("race", "result", "position", classified, False),
         ("raceall", "result", "position", lambda va, vb: va == dnf and vb == dnf, False),
-        ("quali", "quali", "grid", on_grid, False),
+        ("quali", "quali", "quali_rank", on_grid, False),
         ("newrace", "result", "position", classified, True),
-        ("newquali", "quali", "grid", on_grid, True),
+        ("newquali", "quali", "quali_rank", on_grid, True),
     )
     # Per driver: current team, races with it, and whether they ever moved.
     team: dict = {}

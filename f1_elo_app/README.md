@@ -81,7 +81,10 @@ analysis.driver_rating_history(df, raw["drivers"], ["Lewis Hamilton", "Max Verst
 
 For each race, in chronological order:
 
-1. **Qualifying pass** (low K-factor), entries ordered by grid (grid 0 = last).
+1. **Qualifying pass** (low K-factor), entries ordered by the real qualifying
+   result from `qualifying.csv` (1994 onwards), otherwise by the starting grid
+   (grid 0 = last). The grid includes engine and gearbox penalties, so it's
+   only the fallback.
 2. **Race pass** (high K-factor), entries ordered by finishing position
    (`\N` = DNF = last).
 
@@ -95,7 +98,7 @@ car: driver A vs driver B is predicted from `D_a + lam*C_a` vs `D_b + lam*C_b`
 the car explains earns little, so car strength doesn't leak into driver
 ratings; teammates share a car, so for them only the drivers count. Each
 side of a driver pair is also weighted by the other driver's confidence
-(0.5 against a newcomer, rising to 1 against a 100%-confidence driver), so
+(0.6 against a newcomer, rising to 1 against a 100%-confidence driver), so
 results against part-timers with unsettled ratings count less, for wins and
 losses alike.
 
