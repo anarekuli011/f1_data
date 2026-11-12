@@ -24,9 +24,19 @@ you can tune one or two at a time:
                             driver_opponent_confidence_floor: how much a
                             result against a 0%-confidence driver counts
                             (1 = as much as any other, i.e. off)
+    --confidence-races MIN MAX
+                            driver_confidence_races: races from zero to full
+                            confidence (whole numbers; default step 2)
 
 each with a matching --...-increment. The constructor settings are taken
-from the config as they are.
+from the config as they are, so tune them first (backtest_constructors.py).
+
+Periods: with no --period or --last, every table is scored on 1990-2022
+(tune: pick settings from this one) and 1950-1979 (check: where the
+multi-car and part-timer fixes matter). 2023 onwards is the holdout, left out
+of everything, --era-seasons included, until you add --holdout once at the
+very end. Constants in f1elo/backtest.py (TUNE_PERIOD, CHECK_PERIOD,
+HOLDOUT_START).
 
 Besides the usual teammate scores, every table shows the same scores for
 NEW teammate pairs (newrace / newquali: the first --new-races races, default
@@ -46,12 +56,17 @@ ratings at that moment. Teammates share a car, so this tests whether the
 driver ratings capture the driver rather than the car. Lower log loss is
 better; 0.6931 = coin flip. See f1elo/backtest.py for details.
 
-Suggested order (race K and exponent interact, so tune them together):
-  1. --race-k with --exponent
-  2. --quali-k  (use --metric quali_logloss)
-  3. --rookie-ratio
-  4. --dnf-factor  (DNF-cause data suggests about 0.25-0.3)
-  5. --race-k with --exponent again, in a narrow range, to confirm.
+Retune order (after the constructor settings; pairs on one line are tuned
+together because they trade off against each other):
+  1. --car-weight with --exponent      (check the exponent stays at 0)
+  2. --race-k with --car-weight         (exponent from step 1)
+  3. --quali-k                          (--metric quali_logloss)
+  4. --dnf-factor
+  5. --confidence-races with --rookie-ratio
+  6. --opponent-floor with --rookie-ratio   (watch the 1950-1979 check)
+  7. --confidence-drop                  (with --era-seasons)
+  8. --race-k, --car-weight and --confidence-races, narrow ranges, to confirm
+  9. the final settings once with --holdout.
 
 Writes the full results to output/backtest_drivers.csv.
 """
@@ -63,14 +78,15 @@ import time
 import pandas as pd
 
 from f1elo import build_race_frame, config
-from f1elo.backtest import (DRIVER_PARAMS, driver_backtest, driver_config,
-                            driver_defaults, parse_period, prepare_races,
+from f1elo.backtest import (DRIVER_PARAMS, HOLDOUT_START, INTEGER_PARAMS,
+                            TUNE_PERIOD, check_whole, default_periods,
+                            driver_backtest, driver_config, driver_defaults,
+                            holdout_period, parse_period, prepare_races,
                             summarise_drivers, sweep_drivers, value_range)
 
 # Teammate pairs are far fewer than all car pairs, so scores are noisier:
 # settings within this much of the best are treated as a tie.
 NEAR_BEST = 0.001
-DEFAULT_SINCE = 1990
 
 # name -> (flag, increment flag, default increment, help)
 OPTIONS = {
@@ -92,6 +108,9 @@ OPTIONS = {
     "opponent_floor": ("--opponent-floor", "--opponent-floor-increment", 0.1,
                        "driver_opponent_confidence_floor (weight of a result "
                        "against a zero-confidence driver; 1 = off)"),
+    "confidence_races": ("--confidence-races", "--confidence-races-increment", 2,
+                         "driver_confidence_races (races from zero to full "
+                         "confidence; whole numbers)"),
 }
 
 # Scores shown next to the chosen metric for every combination.
@@ -106,7 +125,10 @@ def main() -> None:
                    help="Seasons to score, e.g. 2015-2026 or 2024. Repeatable.")
     p.add_argument("--last", type=int, default=None,
                    help="Score the last N seasons. With no --period or --last, "
-                        "scores 1990-latest and the last 5 seasons.")
+                        "scores 1990-2022 (tune) and 1950-1979 (check).")
+    p.add_argument("--holdout", action="store_true",
+                   help="Also score the holdout seasons (2023 to the latest). "
+                        "Use once, after tuning is finished.")
     for name, (flag, step_flag, step, desc) in OPTIONS.items():
         p.add_argument(flag, type=float, nargs="+", metavar=("MIN", "MAX"),
                        dest=name, help=f"{desc} range: MIN MAX (or one value). "
@@ -141,6 +163,8 @@ def main() -> None:
         if bounds is not None:
             try:
                 grid[name] = value_range(bounds, getattr(args, f"{name}_step"))
+                if name in INTEGER_PARAMS:
+                    check_whole(grid[name])
             except ValueError as e:
                 p.error(f"{flag}: {e}")
     varied = [k for k in DRIVER_PARAMS if len(grid.get(k, [None])) > 1]
@@ -157,15 +181,18 @@ def main() -> None:
         start = latest - args.last + 1
         periods[f"last {args.last} ({start}-{latest})"] = (start, latest)
     if not periods:
-        periods[f"{DEFAULT_SINCE}-{latest} (use this)"] = (DEFAULT_SINCE, latest)
-        periods[f"last 5 ({latest - 4}-{latest}, check)"] = (latest - 4, latest)
+        periods.update(default_periods(latest))
     if args.era_seasons:
+        # Holdout seasons stay out unless --holdout is given.
+        last_year = latest if args.holdout else HOLDOUT_START - 1
         eras = sorted(y for y in config.DEFAULT_CONFIG.regulation_change_years
-                      if DEFAULT_SINCE <= y <= latest)
+                      if TUNE_PERIOD[0] <= y <= last_year)
         periods[f"era-start seasons ({', '.join(map(str, eras))})"] = frozenset(eras)
-        after = [y + 1 for y in eras if y + 1 <= latest]
+        after = [y + 1 for y in eras if y + 1 <= last_year]
         if after:
             periods[f"seasons after ({', '.join(map(str, after))})"] = frozenset(after)
+    if args.holdout:
+        periods.update(holdout_period(latest))
     print(f"Scoring periods: {', '.join(periods)}")
 
     # The current config, as the baseline to beat.

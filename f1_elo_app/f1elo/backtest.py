@@ -51,11 +51,25 @@ in other cars; car strength leaked into a driver rating shows up here.
 rating over every entry in the period, before each race. Part of it is real
 (top teams hire top drivers), part is car strength leaking in; lower at equal
 teammate scores means less leak.
+
+Before 1980 a make often ran more than two cars (works and privateer cars
+share one constructorId). With ``driver_shared_make_weighting`` on, as in the
+engine, each pair within such a make is weighted 1 / (cars - 1) in these
+scores, so pair counts can be fractional.
+
+Periods
+-------
+Both scripts tune on TUNE_PERIOD (1990-2022) and report CHECK_PERIOD
+(1950-1979) alongside, where the multi-car and part-timer fixes matter. The
+seasons from HOLDOUT_START (2023) on are the holdout: left out of every
+default table, and scored only with --holdout, once, after tuning is done.
+Settings that still hold up there are real, not fitted to noise.
 """
 from __future__ import annotations
 
 import math
 import re
+from collections import Counter
 from dataclasses import replace
 
 import pandas as pd
@@ -67,6 +81,32 @@ from .elo_engine import EloEngine, expected_score
 # ---------------------------------------------------------------------------
 # Small helpers shared by the backtest scripts
 # ---------------------------------------------------------------------------
+# Default scoring periods (see "Periods" above).
+TUNE_PERIOD = (1990, 2022)
+CHECK_PERIOD = (1950, 1979)
+HOLDOUT_START = 2023
+
+
+def default_periods(latest: int) -> dict[str, tuple[int, int]]:
+    """The tuning period, plus the pre-1980 check period."""
+    return {
+        f"{TUNE_PERIOD[0]}-{TUNE_PERIOD[1]} (tune)": TUNE_PERIOD,
+        f"{CHECK_PERIOD[0]}-{CHECK_PERIOD[1]} (check)": CHECK_PERIOD,
+    }
+
+
+def holdout_period(latest: int) -> dict[str, tuple[int, int]]:
+    """The holdout seasons: score these once, after tuning is finished."""
+    return {f"{HOLDOUT_START}-{latest} (holdout)": (HOLDOUT_START, latest)}
+
+
+def check_whole(values: list) -> None:
+    """Raise ValueError unless every value is a whole number."""
+    bad = [v for v in values if not float(v).is_integer()]
+    if bad:
+        raise ValueError(f"takes whole numbers, got {', '.join(f'{v:g}' for v in bad)}")
+
+
 def parse_period(text: str) -> tuple[str, tuple[int, int]]:
     """'2015-2026' -> ('2015-2026', (2015, 2026)); '2024' -> one season."""
     m = re.fullmatch(r"\s*(\d{4})\s*(?:-\s*(\d{4}))?\s*", text)
@@ -180,9 +220,10 @@ def constructor_backtest(prepared: list[tuple],
     return pd.DataFrame(rows)
 
 
-def summarise(per_race: pd.DataFrame, start: int, end: int) -> dict:
-    """Pool per-race sums into mean scores for races in [start, end]."""
-    r = per_race[(per_race["year"] >= start) & (per_race["year"] <= end)]
+def summarise(per_race: pd.DataFrame, period) -> dict:
+    """Pool per-race sums into mean scores for races in a period: a
+    (start, end) pair of seasons, or a set of seasons."""
+    r = select_period(per_race, period)
     n = r["pairs"].sum()
     if n == 0:
         return {}
@@ -195,7 +236,7 @@ def summarise(per_race: pd.DataFrame, start: int, end: int) -> dict:
 
 
 def sweep_constructor_k(prepared: list[tuple], race_ks, quali_ks,
-                        periods: dict[str, tuple[int, int]],
+                        periods: dict,
                         base: EloConfig = DEFAULT_CONFIG,
                         progress: bool = False,
                         boost_race_ks=(None,), boost_quali_ks=(None,),
@@ -218,8 +259,8 @@ def sweep_constructor_k(prepared: list[tuple], race_ks, quali_ks,
         if boost_races is not None:
             cfg = replace(cfg, era_start_races=boost_races)
         per_race = constructor_backtest(prepared, cfg)
-        for label, (start, end) in periods.items():
-            s = summarise(per_race, start, end)
+        for label, period in periods.items():
+            s = summarise(per_race, period)
             if s:
                 rows.append({"k_race": kr, "k_quali": kq,
                              "boost_race": br, "boost_quali": bq,
@@ -237,7 +278,10 @@ def sweep_constructor_k(prepared: list[tuple], race_ks, quali_ks,
 # The driver settings a sweep can vary, in the order they're reported.
 DRIVER_PARAMS = ("race_k", "quali_k", "rookie_ratio", "exponent", "dnf_factor",
                  "confidence_drop", "car_weight", "car_before_update",
-                 "opponent_floor")
+                 "opponent_floor", "confidence_races")
+
+# Sweep parameters that must be whole numbers.
+INTEGER_PARAMS = ("car_before_update", "confidence_races")
 
 # Teammate comparisons scored by driver_backtest.
 DRIVER_SCORES = ("race", "raceall", "quali", "newrace", "newquali")
@@ -255,6 +299,7 @@ def driver_defaults(cfg: EloConfig = DEFAULT_CONFIG) -> dict[str, float]:
         "car_weight": cfg.driver_car_weight,
         "car_before_update": int(cfg.driver_car_before_update),
         "opponent_floor": cfg.driver_opponent_confidence_floor,
+        "confidence_races": cfg.driver_confidence_races,
     }
 
 
@@ -262,7 +307,7 @@ def driver_config(base: EloConfig, race_k: float, quali_k: float,
                   rookie_ratio: float, exponent: float,
                   dnf_factor: float, confidence_drop: float,
                   car_weight: float, car_before_update: float,
-                  opponent_floor: float) -> EloConfig:
+                  opponent_floor: float, confidence_races: int) -> EloConfig:
     """Build a config from sweep parameters.
 
     race_k / quali_k are the VETERAN (100% confidence) K-factors; the rookie
@@ -280,17 +325,23 @@ def driver_config(base: EloConfig, race_k: float, quali_k: float,
         driver_car_weight=float(car_weight),
         driver_car_before_update=bool(car_before_update),
         driver_opponent_confidence_floor=float(opponent_floor),
+        driver_confidence_races=int(round(confidence_races)),
     )
 
 
 def _score_teammates(ratings: dict, drivers: list, teams: list, vals: list,
-                     skip, scale: float, only=None):
+                     skip, scale: float, only=None, shared_make: bool = False):
     """Score teammate pairs (i is ahead of j) against the current ratings.
 
     ``only``: if given, a set of drivers; a pair counts only if at least one
     of the two is in it.
+    ``shared_make``: a make with k > 2 cars in the session (works and
+    privateer cars sharing one constructorId) has each of its pairs weighted
+    1 / (k - 1), as in the engine, so they add up to one teammate pair per
+    driver. Pair counts and score sums are then weighted.
     """
-    n_pairs = 0
+    cars = Counter(teams) if shared_make else None
+    n_pairs = 0.0
     logloss = brier = correct = 0.0
     n = len(drivers)
     for i in range(n):
@@ -301,12 +352,13 @@ def _score_teammates(ratings: dict, drivers: list, teams: list, vals: list,
                 continue
             if only is not None and a not in only and b not in only:
                 continue
+            w = 1.0 / (cars[ta] - 1) if cars is not None and cars[ta] > 2 else 1.0
             p = expected_score(ratings[a], ratings[b], scale)
             p = min(max(p, 1e-12), 1 - 1e-12)
-            logloss -= math.log(p)
-            brier += (1.0 - p) ** 2
-            correct += 1.0 if p > 0.5 else (0.5 if p == 0.5 else 0.0)
-            n_pairs += 1
+            logloss -= w * math.log(p)
+            brier += w * (1.0 - p) ** 2
+            correct += w * (1.0 if p > 0.5 else (0.5 if p == 0.5 else 0.0))
+            n_pairs += w
     return n_pairs, logloss, brier, correct
 
 
@@ -356,7 +408,8 @@ def driver_backtest(prepared: list[tuple], cfg: EloConfig = DEFAULT_CONFIG,
             n, ll, br, co = _score_teammates(
                 engine.driver_elo, f["driverId"].tolist(),
                 f["constructorId"].tolist(), f[col].tolist(),
-                skip, scale, only=new if only_new else None)
+                skip, scale, only=new if only_new else None,
+                shared_make=cfg.driver_shared_make_weighting)
             row.update({f"{name}_pairs": n, f"{name}_logloss": ll,
                         f"{name}_brier": br, f"{name}_correct": co})
 
