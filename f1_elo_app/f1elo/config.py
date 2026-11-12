@@ -141,6 +141,30 @@ class EloConfig:
     # None = no correction (the original divide-by-n).
     reference_field_size: int | None = 20
 
+    # Makes with more than two cars (common before 1980: the data identifies
+    # a car by its make, so works and privateer Maseratis or Coopers share one
+    # constructorId -- up to 15 in one race).
+    #
+    # Constructors: each make's update is the AVERAGE over its cars in that
+    # session, scaled to this many cars, instead of the sum. Every car counts
+    # equally, so a make's rating is its typical car, and a 10-car make no
+    # longer moves 5x as far per race as a 2-car team. With 2 every two-car
+    # team moves exactly as before; a one-car team moves as far as a two-car
+    # team whose cars did the same. None = the original sum over cars.
+    constructor_reference_cars: int | None = 2
+    # Drivers: pairs within one make share a car rating, so the car term
+    # cancels and the whole gap counts as driver skill -- wrong for a works
+    # driver beating privateers in an older car of the same make. With this
+    # on, every same-make pair is weighted 1 / (cars - 1): each driver's
+    # comparisons with their own make add up to one teammate's worth,
+    # however many cars it ran, all weighted equally. The driver's race is
+    # then averaged over the weight of comparisons they actually had
+    # (n - cars + 1 instead of n - 1), so a race moves them as far as anyone
+    # else's -- the same-make pairs only count less within it. Two-car
+    # teams are unchanged. False = every same-make pair at full weight
+    # (original).
+    driver_shared_make_weighting: bool = True
+
     # Standard ELO logistic scale (the "400" in the classic formula).
     elo_scale: float = 400.0
 

@@ -44,8 +44,25 @@ Each side of a driver pair is also weighted by the OTHER driver's confidence:
 whose rating is still a guess, counts less -- for a win and a loss alike, so
 a correctly rated driver doesn't drift. This stops part-timers, who start at
 1000 but are mostly worse, from feeding rating to the regulars who beat them.
+
+Makes with more than two cars (common before 1980, when works and privateer
+cars of one make share a constructorId):
+  - Constructors: a make's update is the average over its cars in that
+    session, scaled to ``constructor_reference_cars`` (2), not the sum. Every
+    car counts equally, and a 10-car make no longer moves 5x as far as a
+    2-car team.
+  - Drivers: with ``driver_shared_make_weighting``, each same-make pair is
+    weighted 1 / (cars - 1), so a driver's comparisons with their own make
+    add up to one teammate's worth. The car term cancels in those pairs, so
+    without this a works driver beating a field of privateers in older cars
+    of the same make got the whole car gap as driver credit. The driver's
+    race is averaged over the weight of comparisons they had (n - cars + 1,
+    not n - 1), so it moves them as far as anyone's race.
+Two-car teams are unaffected by both.
 """
 from __future__ import annotations
+
+from collections import Counter
 
 import pandas as pd
 
@@ -235,6 +252,15 @@ class EloEngine:
                     self.constructor_race_count.get(a, 0) + 1
                 )
 
+        # Average each make over its cars (scaled to the reference number),
+        # instead of summing them: a 10-car make moves no further per race
+        # than a 2-car team, and every car counts equally.
+        ref = cfg.constructor_reference_cars
+        if ref:
+            cars = Counter(ids)
+            for c in changes:
+                changes[c] *= ref / cars[c]
+
         self._apply(self.constructor_elo, changes, n)
 
     def _driver_pass(self, order: pd.DataFrame, col: str, sentinel,
@@ -252,6 +278,16 @@ class EloEngine:
         constructor_ids = order["constructorId"].tolist()
         vals = order[col].tolist()
         n = len(driver_ids)
+        # Cars per make in this session, for weighting same-make pairs.
+        cars = Counter(constructor_ids) if cfg.driver_shared_make_weighting else None
+        # Down-weighting a k-car make's same-make pairs leaves its drivers
+        # n - k + 1 comparisons' worth instead of n - 1. Scale them back up,
+        # so the race is a weighted AVERAGE over opponents: the same-make
+        # pairs count less within it, but the race moves the driver as far
+        # as anyone else's. 1 for two-car teams (and with the option off).
+        rescale = [(n - 1) / (n - cars[c] + 1)
+                   if cars is not None and cars[c] > 2 else 1.0
+                   for c in constructor_ids]
 
         changes: dict = {}
         for i in range(n):
@@ -288,8 +324,16 @@ class EloEngine:
                 dnf = (cfg.driver_dnf_penalty_factor
                        if is_race and vb == sentinel else 1.0)
 
-                new_ra = ra + k_a * (1 - ea) * adj * dnf   # sa = 1
-                new_rb = rb + k_b * (0 - eb) * adj * dnf    # sb = 0
+                # Same make, more than two cars (works + privateers sharing
+                # one car rating): weight each pair 1 / (cars - 1), so a
+                # driver's same-make comparisons add up to one teammate's
+                # worth. Two-car teams: weight 1, as before.
+                mate = (1.0 / (cars[ca] - 1)
+                        if cars is not None and ca == cb and cars[ca] > 2 else 1.0)
+
+                w = adj * dnf * mate
+                new_ra = ra + k_a * (1 - ea) * w * rescale[i]   # sa = 1
+                new_rb = rb + k_b * (0 - eb) * w * rescale[j]   # sb = 0
                 self._record(changes, self.highest_driver,
                              a, b, new_ra, new_rb, ra, rb)
 

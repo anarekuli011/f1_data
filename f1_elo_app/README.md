@@ -97,7 +97,16 @@ ratings; teammates share a car, so for them only the drivers count. Each
 side of a driver pair is also weighted by the other driver's confidence
 (0.5 against a newcomer, rising to 1 against a 100%-confidence driver), so
 results against part-timers with unsettled ratings count less, for wins and
-losses alike. All K-factors and the car weight live in `config.py`.
+losses alike.
+
+Before about 1980 a make often ran many cars (works and privateer Maseratis
+share one constructor id, up to 15 in a race). A make's constructor update is
+the average over its cars (scaled to two cars) rather than the sum, and
+driver pairs within one make are weighted 1 / (cars − 1), so they add up to
+one teammate's worth. Each driver's race is averaged over the weight of
+comparisons they had, so it still moves them as far as anyone's race.
+Two-car teams are unaffected. All K-factors and the car
+weight live in `config.py`.
 
 ## Notes vs. the original notebook
 
