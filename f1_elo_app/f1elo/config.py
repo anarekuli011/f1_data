@@ -41,13 +41,13 @@ class EloConfig:
     initial_elo: float = 1000.0
 
     # K-factors for constructors.
-    k_constructor_race: float = 52.0
-    k_constructor_quali: float = 18.0
+    k_constructor_race: float = 45.0
+    k_constructor_quali: float = 19.0
 
     # Era-start boost for constructors. A big regulation change reshuffles
     # the order, so ratings need to move faster until they catch up. Each
     # season in `regulation_change_years` starts with an "era confidence" of
-    # 0%, rising by 1/era_start_races per race (10 races -> 10% per race).
+    # 0%, rising by 1/era_start_races per race (7 races -> about 14% per race).
     # The constructor K slides linearly from the era-start K below (at 0%)
     # to the normal K above (at 100%), like the driver confidence.
     # None = no boost (use the normal K). Drivers are unaffected.
@@ -64,10 +64,11 @@ class EloConfig:
         2026,  # new power units and active aero
     )
     # Races for the era confidence to reach 100%: round 1 uses the full
-    # era-start K, round 11 onwards the normal K.
-    era_start_races: int = 10
-    k_constructor_race_era_start: float | None = 60.0
-    k_constructor_quali_era_start: float | None = 24.0
+    # era-start K, round 8 onwards the normal K. Backtested together with the
+    # era-start K-factors below, on the regulation-change seasons 1998-2022.
+    era_start_races: int = 7
+    k_constructor_race_era_start: float | None = 94.0
+    k_constructor_quali_era_start: float | None = 49.0
 
     # K-factors for drivers, scaled by a confidence level.
     # Confidence runs from 0 to driver_confidence_races "races' worth"
