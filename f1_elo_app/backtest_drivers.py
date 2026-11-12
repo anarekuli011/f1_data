@@ -20,6 +20,10 @@ you can tune one or two at a time:
                             driver expectation, D + lam * C
     --car-before-update 0 1 1 = driver passes see the car ratings from before
                             that session's constructor update
+    --opponent-floor MIN MAX
+                            driver_opponent_confidence_floor: how much a
+                            result against a 0%-confidence driver counts
+                            (1 = as much as any other, i.e. off)
 
 each with a matching --...-increment. The constructor settings are taken
 from the config as they are.
@@ -85,6 +89,9 @@ OPTIONS = {
     "car_before_update": ("--car-before-update", "--car-before-update-increment", 1,
                           "1 = driver passes use car ratings from before the "
                           "session's constructor update, 0 = after"),
+    "opponent_floor": ("--opponent-floor", "--opponent-floor-increment", 0.1,
+                       "driver_opponent_confidence_floor (weight of a result "
+                       "against a zero-confidence driver; 1 = off)"),
 }
 
 # Scores shown next to the chosen metric for every combination.

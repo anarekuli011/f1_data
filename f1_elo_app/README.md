@@ -93,8 +93,11 @@ original divide-by-n on a 20-car grid. For drivers, the expected result of a pai
 car: driver A vs driver B is predicted from `D_a + lam*C_a` vs `D_b + lam*C_b`
 (driver plus weighted constructor rating, `driver_car_weight` = 0.875). A win
 the car explains earns little, so car strength doesn't leak into driver
-ratings; teammates share a car, so for them only the drivers count. All
-K-factors and the car weight live in `config.py`.
+ratings; teammates share a car, so for them only the drivers count. Each
+side of a driver pair is also weighted by the other driver's confidence
+(0.5 against a newcomer, rising to 1 against a 100%-confidence driver), so
+results against part-timers with unsettled ratings count less, for wins and
+losses alike. All K-factors and the car weight live in `config.py`.
 
 ## Notes vs. the original notebook
 

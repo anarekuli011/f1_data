@@ -87,6 +87,19 @@ class EloConfig:
     k_driver_quali_rookie: float = 120.0
     k_driver_quali_veteran: float = 60.0
 
+    # Opponent-confidence weight (drivers only). A result against a driver
+    # whose rating is still uncertain says less, so each side of a pair is
+    # weighted by the OTHER driver's confidence:
+    #     weight = floor + (1 - floor) * opponent_confidence   (0..1)
+    # A veteran who beats a 0%-confidence newcomer gains floor x as much,
+    # and loses floor x as much to one -- the same weight for a win and a
+    # loss, so a correctly rated driver doesn't drift. Against a 100%
+    # confident opponent the weight is 1. Your own confidence is already in
+    # your own K. Stops part-timers, who start at 1000 but are mostly worse,
+    # from feeding rating to the regulars who beat them.
+    # 1.0 = off (the original behaviour). 0.5 is a first guess, to be tuned.
+    driver_opponent_confidence_floor: float = 0.5
+
     # Weight of the car in the driver expectation: driver A vs driver B is
     # predicted from (D_a + driver_car_weight * C_a) vs
     # (D_b + driver_car_weight * C_b), C = constructor rating. 0 = drivers

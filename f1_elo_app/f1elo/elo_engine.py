@@ -37,6 +37,13 @@ race): rookie K at 0%, veteran K at 100%, linear in between. A classified
 finish adds a race of confidence; a DNF or a missed race takes one away. At
 the first race of a regulation-change season, every driver loses
 ``era_start_confidence_drop`` (50 percentage points) of confidence.
+
+Each side of a driver pair is also weighted by the OTHER driver's confidence:
+``floor + (1 - floor) * opponent_confidence`` with floor
+``driver_opponent_confidence_floor`` (0.5). A result against a newcomer,
+whose rating is still a guess, counts less -- for a win and a loss alike, so
+a correctly rated driver doesn't drift. This stops part-timers, who start at
+1000 but are mostly worse, from feeding rating to the regulars who beat them.
 """
 from __future__ import annotations
 
@@ -106,6 +113,14 @@ class EloEngine:
         if n <= 0:
             return 1.0
         return min(self.driver_confidence.get(driver_id, 0), n) / n
+
+    def _opponent_weight(self, opponent_id) -> float:
+        """How much a result against this opponent counts: the configured
+        floor at 0% opponent confidence, rising linearly to 1 at 100%."""
+        floor = self.cfg.driver_opponent_confidence_floor
+        if floor >= 1.0:
+            return 1.0
+        return floor + (1.0 - floor) * self.confidence_pct(opponent_id)
 
     def _k_driver(self, driver_id, is_race: bool) -> float:
         """Slide linearly from the rookie K (0%) to the veteran K (100%)."""
@@ -251,8 +266,11 @@ class EloEngine:
                 con_ra = car_elo[ca]
                 con_rb = car_elo[cb]
 
-                k_a = self._k_driver(a, is_race)
-                k_b = self._k_driver(b, is_race)
+                # Own K from own confidence, weighted by the OTHER driver's
+                # confidence: a result against an uncertain rating counts
+                # less, for a win and a loss alike.
+                k_a = self._k_driver(a, is_race) * self._opponent_weight(b)
+                k_b = self._k_driver(b, is_race) * self._opponent_weight(a)
                 # Expected result from driver + weighted car strength, so a
                 # win the car explains earns little (teammates: same car).
                 ea = expected_score(ra + lam * con_ra, rb + lam * con_rb,

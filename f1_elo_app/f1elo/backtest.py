@@ -236,7 +236,8 @@ def sweep_constructor_k(prepared: list[tuple], race_ks, quali_ks,
 # ---------------------------------------------------------------------------
 # The driver settings a sweep can vary, in the order they're reported.
 DRIVER_PARAMS = ("race_k", "quali_k", "rookie_ratio", "exponent", "dnf_factor",
-                 "confidence_drop", "car_weight", "car_before_update")
+                 "confidence_drop", "car_weight", "car_before_update",
+                 "opponent_floor")
 
 # Teammate comparisons scored by driver_backtest.
 DRIVER_SCORES = ("race", "raceall", "quali", "newrace", "newquali")
@@ -253,13 +254,15 @@ def driver_defaults(cfg: EloConfig = DEFAULT_CONFIG) -> dict[str, float]:
         "confidence_drop": cfg.era_start_confidence_drop,
         "car_weight": cfg.driver_car_weight,
         "car_before_update": int(cfg.driver_car_before_update),
+        "opponent_floor": cfg.driver_opponent_confidence_floor,
     }
 
 
 def driver_config(base: EloConfig, race_k: float, quali_k: float,
                   rookie_ratio: float, exponent: float,
                   dnf_factor: float, confidence_drop: float,
-                  car_weight: float, car_before_update: float) -> EloConfig:
+                  car_weight: float, car_before_update: float,
+                  opponent_floor: float) -> EloConfig:
     """Build a config from sweep parameters.
 
     race_k / quali_k are the VETERAN (100% confidence) K-factors; the rookie
@@ -276,6 +279,7 @@ def driver_config(base: EloConfig, race_k: float, quali_k: float,
         era_start_confidence_drop=float(confidence_drop),
         driver_car_weight=float(car_weight),
         driver_car_before_update=bool(car_before_update),
+        driver_opponent_confidence_floor=float(opponent_floor),
     )
 
 
