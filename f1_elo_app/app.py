@@ -110,19 +110,22 @@ BASE_COLUMNS = ["Start", "End", "Grid median at end", "End vs grid", "End vs gri
                 "End pos score", "Change", "Peak", "Grid median at peak", "Peak vs grid",
                 "Peak vs grid %", "Peak pos score", "Peak at", "Races"]
 
-# Positional scores: the average of a row's positions (1 = highest) by three
-# columns, within the list as shown (after the filters), so they change with
-# the list's boundary. Lower = better. The first column is the rating the
-# top-N cut uses when ranking by the score.
+# Positional scores: the average of a row's positions (1 = highest) by a
+# rating and its gap to the grid median, within the list as shown (after the
+# filters), so they change with the list's boundary. Lower = better. The
+# rating (first) is also what the top-N cut uses when ranking by the score.
+# The grid median itself is left out: the gap already measures the rating
+# against it, and adding it would reward the opposite (a high median at the
+# same rating means a smaller gap), mostly reflecting who was on a run then.
 POS_SCORES = {
-    "End pos score": ("End", "Grid median at end", "End vs grid"),
-    "Peak pos score": ("Peak", "Grid median at peak", "Peak vs grid"),
-    "Peak team pos score": ("Peak team rating", "Team grid median at peak",
-                            "Peak team vs grid"),
+    "End pos score": ("End", "End vs grid"),
+    "Peak pos score": ("Peak", "Peak vs grid"),
+    "Peak team pos score": ("Peak team rating", "Peak team vs grid"),
 }
 POS_HELP = ("The average of this row's positions in the list shown (1 = highest) "
-            "by {a}, {b} and {c}. Lower = better; 1.0 = first in all three. It's "
-            "relative to the list, so it changes with the filters.")
+            "by {a} and {b}: how high the rating was, and how far above the "
+            "typical one on the grid at the time. Lower = better; 1.0 = first in "
+            "both. It's relative to the list, so it changes with the filters.")
 RANK_OPTIONS = ["End", "Peak", "Change"]
 DEFAULT_COLUMNS = ["Start", "End", "Change", "Peak", "Peak at", "Races"]
 BASE_HELP = {
@@ -564,8 +567,8 @@ for c, when in WIN_WHEN.items():
         help=WIN_HELP[v].format(when=when), format="%d%%")
 col_config["Peak team vs grid %"] = st.column_config.NumberColumn(
     help=TEAM_HELP["Peak team vs grid %"], format="%d%%")
-for c, (a, b, c3) in POS_SCORES.items():
+for c, (a, b) in POS_SCORES.items():
     col_config[c] = st.column_config.NumberColumn(
-        help=POS_HELP.format(a=a, b=b, c=c3), format="%.2f")
+        help=POS_HELP.format(a=a, b=b), format="%.2f")
 st.dataframe(table, hide_index=True, width="stretch",
              column_order=["#", cfg["column"], *shown_cols], column_config=col_config)
