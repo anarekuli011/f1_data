@@ -107,8 +107,23 @@ def load(mtimes: tuple):
 # DEFAULT_COLUMNS start shown (and come back with "Default columns"); the
 # grid comparisons and the team ones (drivers view only) start hidden.
 BASE_COLUMNS = ["Start", "End", "Grid median at end", "End vs grid", "End vs grid %",
-                "Change", "Peak", "Grid median at peak", "Peak vs grid",
-                "Peak vs grid %", "Peak at", "Races"]
+                "End pos score", "Change", "Peak", "Grid median at peak", "Peak vs grid",
+                "Peak vs grid %", "Peak pos score", "Peak at", "Races"]
+
+# Positional scores: the average of a row's positions (1 = highest) by three
+# columns, within the list as shown (after the filters), so they change with
+# the list's boundary. Lower = better. The first column is the rating the
+# top-N cut uses when ranking by the score.
+POS_SCORES = {
+    "End pos score": ("End", "Grid median at end", "End vs grid"),
+    "Peak pos score": ("Peak", "Grid median at peak", "Peak vs grid"),
+    "Peak team pos score": ("Peak team rating", "Team grid median at peak",
+                            "Peak team vs grid"),
+}
+POS_HELP = ("The average of this row's positions in the list shown (1 = highest) "
+            "by {a}, {b} and {c}. Lower = better; 1.0 = first in all three. It's "
+            "relative to the list, so it changes with the filters.")
+RANK_OPTIONS = ["End", "Peak", "Change"]
 DEFAULT_COLUMNS = ["Start", "End", "Change", "Peak", "Peak at", "Races"]
 BASE_HELP = {
     "Grid median at end": "The median rating of the grid after the race where End "
@@ -142,7 +157,8 @@ def win_chance(gap: float) -> int:
 
 TEAM_COLUMNS = ["Current team", "Current team: peak", "Current team: end",
                 "Current team: change", "Peak team", "Peak team rating",
-                "Team grid median at peak", "Peak team vs grid", "Peak team vs grid %"]
+                "Team grid median at peak", "Peak team vs grid", "Peak team vs grid %",
+                "Peak team pos score"]
 TEAM_HELP = {
     "Current team": "The team in the driver's last race of the period.",
     "Current team: peak": "That team's highest rating during the driver's current "
@@ -354,8 +370,10 @@ with st.sidebar:
                     key=f"{v}:min_races", disabled=not state[f"{v}:min_on"])
     st.toggle("Top positions only", key=f"{v}:top_on",
               help="Keep only the top positions by the 'Rank by' choice above the "
-                   "table (End, Peak or Change). Equal values share a position, so "
-                   "a tie at the cut-off can show a few more.")
+                   "table (End, Peak or Change). Ranking by a positional score cuts "
+                   "by its rating (Peak pos score: the top N by Peak), then orders "
+                   "that list by the score. Equal values share a position, so a "
+                   "tie at the cut-off can show a few more.")
     st.number_input("Show the top", min_value=1, step=1, key=f"{v}:top_n",
                     disabled=not state[f"{v}:top_on"])
 
@@ -411,18 +429,39 @@ if view.empty:
     st.stop()
 view["label"] = view["id"].map(labels)
 
+# Columns this view offers, and the ones picked (drawn below the chart).
+optional = BASE_COLUMNS + (TEAM_COLUMNS if v == "drivers" else [])
+state.setdefault(f"{v}:columns", list(DEFAULT_COLUMNS))
+# Drop column names that no longer exist (a session from an older version).
+state[f"{v}:columns"] = [c for c in state[f"{v}:columns"] if c in optional]
+
+# Rank by offers a positional score only while its column is shown; if the
+# chosen one was hidden, fall back to End.
+rank_options = RANK_OPTIONS + [c for c in POS_SCORES if c in state[f"{v}:columns"]]
+state.setdefault("rank_by", "End")
+if state["rank_by"] not in rank_options:
+    state["rank_by"] = state["_rank_by"] = "End"
+rank_by = state["rank_by"]
+
 # The table, ranked and filtered (the Rank by control is drawn under the
 # chart, but its value is known now). The chart shows the same rows.
-state.setdefault("rank_by", "End")
-rank_by = state["rank_by"]
 table = summary(view, labels, cfg["column"], team_names)
 in_period = len(table)
 if state[f"{v}:min_on"]:
     table = table[table["Races"] >= state[f"{v}:min_races"]]
-table = table.sort_values(rank_by, ascending=False)
-table.insert(0, "#", table[rank_by].rank(method="min", ascending=False).astype(int))
 if state[f"{v}:top_on"]:
-    table = table[table["#"] <= state[f"{v}:top_n"]]
+    # The list's boundary: the top N by a rating. Ranking by a positional
+    # score cuts by its rating (Peak pos score -> Peak), then reorders.
+    cut_by = POS_SCORES[rank_by][0] if rank_by in POS_SCORES else rank_by
+    table = table[table[cut_by].rank(method="min", ascending=False) <= state[f"{v}:top_n"]]
+# Positional scores, relative to the list as it now stands.
+for score, cols in POS_SCORES.items():
+    if all(c in table.columns for c in cols):
+        table[score] = sum(table[c].rank(method="min", ascending=False)
+                           for c in cols) / len(cols)
+low_first = rank_by in POS_SCORES  # a lower score is better
+table = table.sort_values(rank_by, ascending=low_first)
+table.insert(0, "#", table[rank_by].rank(method="min", ascending=low_first).astype(int))
 filtered_out = in_period - len(table)
 if table.empty:
     st.warning(f"The filters leave no {cfg['many']} to show. Lower the minimum "
@@ -489,19 +528,16 @@ st.caption(f"Showing {shown} {cfg['many']}" + (f" ({'; '.join(notes)})" if notes
            + ". Ratings are recorded after each race. Drag across the chart to zoom, "
            "double-click to zoom back out.")
 
-optional = BASE_COLUMNS + (TEAM_COLUMNS if v == "drivers" else [])
-state.setdefault(f"{v}:columns", list(DEFAULT_COLUMNS))
-# Drop column names that no longer exist (a session from an older version).
-state[f"{v}:columns"] = [c for c in state[f"{v}:columns"] if c in optional]
-
 # Columns sits next to Rank by, on the left. A horizontal container sizes
 # both to their content and wraps Columns onto the next line when space
 # runs out, so they never overlap (fixed-ratio columns squeezed it on
 # narrow pages).
 with st.container(horizontal=True, vertical_alignment="bottom", gap="medium"):
-    rank_by = choice("Rank by", ["End", "Peak", "Change"], "rank_by",
+    rank_by = choice("Rank by", rank_options, "rank_by",
                      help="Orders the table and numbers each row by this column. "
-                          "Equal values share a position.")
+                          "Equal values share a position. A positional score "
+                          "appears here while its column is shown; it ranks "
+                          "lowest first.")
     with st.popover("Columns", width="content"):
         st.pills("Shown columns", optional, selection_mode="multi", key=f"{v}:columns",
                  help="Pick the columns to show. The rank and name are always shown.")
@@ -528,5 +564,8 @@ for c, when in WIN_WHEN.items():
         help=WIN_HELP[v].format(when=when), format="%d%%")
 col_config["Peak team vs grid %"] = st.column_config.NumberColumn(
     help=TEAM_HELP["Peak team vs grid %"], format="%d%%")
+for c, (a, b, c3) in POS_SCORES.items():
+    col_config[c] = st.column_config.NumberColumn(
+        help=POS_HELP.format(a=a, b=b, c=c3), format="%.2f")
 st.dataframe(table, hide_index=True, width="stretch",
              column_order=["#", cfg["column"], *shown_cols], column_config=col_config)
