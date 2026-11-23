@@ -85,8 +85,7 @@ def load(mtimes: tuple):
 # are shown by default; the team ones (drivers view only) start hidden.
 BASE_COLUMNS = ["Start", "End", "Change", "Peak", "Peak at", "Races"]
 TEAM_COLUMNS = ["Current team", "Current team: peak", "Current team: end",
-                "Current team: change", "Peak team", "Peak team: peak",
-                "Peak team: end", "Peak team: change"]
+                "Current team: change", "Peak team", "Peak team rating"]
 TEAM_HELP = {
     "Current team": "The team in the driver's last race of the period.",
     "Current team: peak": "That team's highest rating during the driver's current "
@@ -95,11 +94,8 @@ TEAM_HELP = {
     "Current team: change": "How much that team's rating moved during the driver's "
                             "current stint (within the period).",
     "Peak team": "The team the driver was racing for when they reached their peak.",
-    "Peak team: peak": "That team's highest rating during the stint in which the "
-                       "driver peaked (within the period).",
-    "Peak team: end": "That team's rating at the end of that stint (or of the period).",
-    "Peak team: change": "How much that team's rating moved during that stint "
-                         "(within the period).",
+    "Peak team rating": "That team's rating at the moment the driver peaked "
+                        "(after the same race).",
 }
 
 
@@ -123,13 +119,15 @@ def summary(view: pd.DataFrame, labels: dict, column: str,
             g = g.sort_values("pos")
             stint = (g["team"] != g["team"].shift()).cumsum()
             current = g[stint == stint.iloc[-1]]
-            at_peak = g[stint == stint.loc[peak.name]]
-            for prefix, s in (("Current team", current), ("Peak team", at_peak)):
-                top, last, change = _stint_figures(s)
-                row[prefix] = team_names.get(s["team"].iloc[0], s["team"].iloc[0])
-                row[f"{prefix}: peak"] = top
-                row[f"{prefix}: end"] = last
-                row[f"{prefix}: change"] = change
+            top, last, change = _stint_figures(current)
+            row["Current team"] = team_names.get(current["team"].iloc[0],
+                                                 current["team"].iloc[0])
+            row["Current team: peak"] = top
+            row["Current team: end"] = last
+            row["Current team: change"] = change
+            # The team at the driver's peak race, and its rating after that race.
+            row["Peak team"] = team_names.get(peak["team"], peak["team"])
+            row["Peak team rating"] = round(peak["team_rating"])
         rows.append(row)
     return pd.DataFrame(rows).sort_values("End", ascending=False)
 
@@ -378,6 +376,8 @@ st.caption(f"Showing {shown} {cfg['many']}" + (f" ({'; '.join(notes)})" if notes
 
 optional = BASE_COLUMNS + (TEAM_COLUMNS if v == "drivers" else [])
 state.setdefault(f"{v}:columns", list(BASE_COLUMNS))
+# Drop column names that no longer exist (a session from an older version).
+state[f"{v}:columns"] = [c for c in state[f"{v}:columns"] if c in optional]
 
 # Columns sits next to Rank by, on the left. A horizontal container sizes
 # both to their content and wraps Columns onto the next line when space
