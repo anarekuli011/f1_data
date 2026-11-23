@@ -26,7 +26,10 @@ VIEWS = {
                      "column": "Constructor", "id": "constructorId", "rating": "EloRating",
                      "names": config.DATA_DIR / "constructors.csv"},
 }
-STATE_KEYS = ("sel", "seasons", "from", "to")
+STATE_KEYS = ("sel", "seasons", "from", "to", "columns",
+              "min_on", "min_races", "top_on", "top_n")
+# Filter defaults: both off; the numbers are what each box starts at.
+FILTER_DEFAULTS = {"min_on": False, "min_races": 10, "top_on": False, "top_n": 20}
 
 st.set_page_config(page_title="F1 ELO", layout="wide")
 
@@ -63,21 +66,28 @@ def load(mtimes: tuple):
     # far above the rest), which pulls the mean up by 8-38 points on average
     # and makes the dominant car itself look less dominant. Being above the
     # median means being expected to beat more than half the teams.
-    grid_median = (res.drop_duplicates(["raceId", "constructorId"])
-                      .groupby("raceId")["EloRating"].median())
+    # The same for drivers: the median driver rating after each race, each
+    # driver counted once. grid_medians[view] is the view's own grid.
+    grid_medians = {
+        view: (res.drop_duplicates(["raceId", cfg["id"]])
+                  .groupby("raceId")[cfg["rating"]].median())
+        for view, cfg in VIEWS.items()
+    }
+    team_median = grid_medians["constructors"]
 
     out = {}
     for view, cfg in VIEWS.items():
         # One row per driver (or team) per race: teammates share the team rating,
         # and 1950s shared drives duplicate drivers.
         frame = res.drop_duplicates(["raceId", cfg["id"]])
-        cols = ["raceId", "id", "date", "year", "round", "name", "rating"]
+        frame = frame.assign(grid_median=frame["raceId"].map(grid_medians[view]))
+        cols = ["raceId", "id", "date", "year", "round", "name", "rating", "grid_median"]
         if view == "drivers":
             # The team the driver raced for in each race, its rating then, and
             # the grid's median team rating in that race.
             frame = frame.assign(team=frame["constructorId"], team_rating=frame["EloRating"],
-                                 grid_median=frame["raceId"].map(grid_median))
-            cols += ["team", "team_rating", "grid_median"]
+                                 team_grid_median=frame["raceId"].map(team_median))
+            cols += ["team", "team_rating", "team_grid_median"]
         frame = frame.rename(columns={cfg["id"]: "id", cfg["rating"]: "rating"})[cols]
         frame["pos"] = frame["raceId"].map(races["pos"])
         names = pd.read_csv(cfg["names"]).rename(columns={cfg["id"]: "id"})
@@ -89,12 +99,21 @@ def load(mtimes: tuple):
         out[view] = (frame, dict(zip(names["id"], names["label"])))
     team_names = (pd.read_csv(VIEWS["constructors"]["names"])
                     .set_index("constructorId")["name"].to_dict())
-    return out, races, team_names
+    latest_medians = {view: m.loc[races.index[-1]] for view, m in grid_medians.items()}
+    return out, races, team_names, latest_medians
 
 
 # Table columns that can be shown or hidden, in display order. The base ones
 # are shown by default; the team ones (drivers view only) start hidden.
-BASE_COLUMNS = ["Start", "End", "Change", "Peak", "Peak at", "Races"]
+BASE_COLUMNS = ["Start", "End", "Grid median", "End vs grid", "Change", "Peak",
+                "Peak at", "Races"]
+BASE_HELP = {
+    "Grid median": "The median rating of the grid after the race where End was "
+                   "taken (the row's last race in the period), each {one} counted "
+                   "once.",
+    "End vs grid": "End minus Grid median: how far above (+) or below (-) the "
+                   "typical {one} on the grid at that moment.",
+}
 TEAM_COLUMNS = ["Current team", "Current team: peak", "Current team: end",
                 "Current team: change", "Peak team", "Peak team rating",
                 "Peak team vs grid"]
@@ -126,7 +145,9 @@ def summary(view: pd.DataFrame, labels: dict, column: str,
     for eid, g in view.groupby("id"):
         peak = g.loc[g["rating"].idxmax()]
         start, end = g["rating"].iloc[0], g["rating"].iloc[-1]
+        grid = g["grid_median"].iloc[-1]  # the grid when End was taken
         row = {column: labels[eid], "Start": round(start), "End": round(end),
+               "Grid median": round(grid), "End vs grid": round(end - grid),
                "Change": round(end - start), "Peak": round(peak["rating"]),
                "Peak at": f"{peak['name']} {peak['year']}", "Races": len(g)}
         if "team" in g.columns:
@@ -143,7 +164,7 @@ def summary(view: pd.DataFrame, labels: dict, column: str,
             # The team at the driver's peak race, and its rating after that race.
             row["Peak team"] = team_names.get(peak["team"], peak["team"])
             row["Peak team rating"] = round(peak["team_rating"])
-            row["Peak team vs grid"] = round(peak["team_rating"] - peak["grid_median"])
+            row["Peak team vs grid"] = round(peak["team_rating"] - peak["team_grid_median"])
         rows.append(row)
     return pd.DataFrame(rows).sort_values("End", ascending=False)
 
@@ -154,15 +175,14 @@ if missing:
     st.error(f"Missing {', '.join(missing)}. Run `py run_elo.py` in this folder first.")
     st.stop()
 
-data, races, team_names = load(tuple(p.stat().st_mtime for p in
+data, races, team_names, latest_medians = load(tuple(p.stat().st_mtime for p in
                          [RESULTS, *(c["names"] for c in VIEWS.values())]))
 all_seasons = sorted(races["year"].unique(), reverse=True)
 state = st.session_state
 
 # Streamlit forgets a widget's value when the widget isn't drawn, which would wipe
 # the hidden view's selection. Re-saving the values each run keeps both views.
-for _key in ([f"{v}:{k}" for v in VIEWS for k in STATE_KEYS + ("columns",)]
-             + ["line_style", "rank_by"]):
+for _key in [f"{v}:{k}" for v in VIEWS for k in STATE_KEYS] + ["line_style", "rank_by"]:
     if _key in state:
         state[_key] = state[_key]
 
@@ -285,6 +305,22 @@ with st.sidebar:
                  key=f"{v}:clear", width="stretch", disabled=not sel)
     st.caption(f"{len(shown_races)} races in this period.")
 
+    # Filters on the chart and the table, both off by default.
+    st.header("Filters")
+    for k, default in FILTER_DEFAULTS.items():
+        state.setdefault(f"{v}:{k}", default)
+    st.toggle("Minimum races", key=f"{v}:min_on",
+              help=f"Hide {cfg['many']} with fewer races than this in the selected "
+                   "period (the table's Races column).")
+    st.number_input("At least this many races in the period", min_value=1, step=1,
+                    key=f"{v}:min_races", disabled=not state[f"{v}:min_on"])
+    st.toggle("Top positions only", key=f"{v}:top_on",
+              help="Keep only the top positions by the 'Rank by' choice above the "
+                   "table (End, Peak or Change). Equal values share a position, so "
+                   "a tie at the cut-off can show a few more.")
+    st.number_input("Show the top", min_value=1, step=1, key=f"{v}:top_n",
+                    disabled=not state[f"{v}:top_on"])
+
     st.header("Data")
     st.caption(f"Latest race: {races['label'].iloc[-1]}")
     if st.button("Check for new races", key="update", width="stretch",
@@ -310,6 +346,10 @@ def dismiss_update():
 
 # -- main area ---------------------------------------------------------------
 st.title(cfg["title"])
+st.caption(f"Latest race: {races['label'].iloc[-1]} · grid median after it: "
+           f"**{latest_medians['drivers']:.0f}** for drivers, "
+           f"**{latest_medians['constructors']:.0f}** for teams "
+           "(each driver or team counted once).")
 
 if "update_error" in state:
     st.error(f"**Update failed.** {state['update_error']}")
@@ -332,6 +372,25 @@ if view.empty:
     st.warning(f"None of the selected {cfg['many']} raced in this period.")
     st.stop()
 view["label"] = view["id"].map(labels)
+
+# The table, ranked and filtered (the Rank by control is drawn under the
+# chart, but its value is known now). The chart shows the same rows.
+state.setdefault("rank_by", "End")
+rank_by = state["rank_by"]
+table = summary(view, labels, cfg["column"], team_names)
+in_period = len(table)
+if state[f"{v}:min_on"]:
+    table = table[table["Races"] >= state[f"{v}:min_races"]]
+table = table.sort_values(rank_by, ascending=False)
+table.insert(0, "#", table[rank_by].rank(method="min", ascending=False).astype(int))
+if state[f"{v}:top_on"]:
+    table = table[table["#"] <= state[f"{v}:top_n"]]
+filtered_out = in_period - len(table)
+if table.empty:
+    st.warning(f"The filters leave no {cfg['many']} to show. Lower the minimum "
+               "races or turn the filters off in the sidebar.")
+    st.stop()
+view = view[view["label"].isin(table[cfg["column"]])]
 
 # Legend in leaderboard order: highest rating at the end of the period first.
 order = view.groupby("label")["rating"].last().sort_values(ascending=False).index.tolist()
@@ -380,10 +439,12 @@ pad = dt.timedelta(days=7)
 fig.update_xaxes(range=[dates[0] - pad, dates[-1] + pad], rangebreaks=breaks)
 st.plotly_chart(fig, width="stretch")
 
-shown = view["id"].nunique()
+shown = len(table)
 notes = []
-if shown < len(sel):
-    notes.append(f"{len(sel) - shown} selected {cfg['many']} didn't race in this period")
+if in_period < len(sel):
+    notes.append(f"{len(sel) - in_period} selected {cfg['many']} didn't race in this period")
+if filtered_out:
+    notes.append(f"{filtered_out} hidden by the filters")
 if breaks:
     notes.append("years between the picked seasons are cut out")
 st.caption(f"Showing {shown} {cfg['many']}" + (f" ({'; '.join(notes)})" if notes else "")
@@ -412,12 +473,14 @@ with st.container(horizontal=True, vertical_alignment="bottom", gap="medium"):
 # the controls when they span the full width (phones).
 st.space("small")
 
-table = summary(view, labels, cfg["column"], team_names).sort_values(rank_by, ascending=False)
-table.insert(0, "#", table[rank_by].rank(method="min", ascending=False).astype(int))
 shown_cols = [c for c in optional if c in state[f"{v}:columns"]]
 config = {"#": st.column_config.NumberColumn(width="small", pinned=True)}
 config.update({c: st.column_config.Column(help=h) for c, h in TEAM_HELP.items()})
+config["Grid median"] = st.column_config.NumberColumn(
+    help=BASE_HELP["Grid median"].format(one=cfg["one"]))
 # Above or below the grid: show the sign (+191 / -42).
+config["End vs grid"] = st.column_config.NumberColumn(
+    help=BASE_HELP["End vs grid"].format(one=cfg["one"]), format="%+d")
 config["Peak team vs grid"] = st.column_config.NumberColumn(
     help=TEAM_HELP["Peak team vs grid"], format="%+d")
 st.dataframe(table, hide_index=True, width="stretch",
