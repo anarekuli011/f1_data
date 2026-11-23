@@ -81,18 +81,35 @@ analysis.driver_rating_history(df, raw["drivers"], ["Lewis Hamilton", "Max Verst
 
 For each race, in chronological order:
 
-1. **Qualifying pass** (low K-factor), entries ordered by grid (grid 0 = last).
+1. **Qualifying pass** (low K-factor), entries ordered by the real qualifying
+   result from `qualifying.csv` (1994 onwards), otherwise by the starting grid
+   (grid 0 = last). The grid includes engine and gearbox penalties, so it's
+   only the fallback.
 2. **Race pass** (high K-factor), entries ordered by finishing position
    (`\N` = DNF = last).
 
 Each pass does a full pairwise comparison — every entry "beats" everyone
-classified below it. Deltas are summed per entity and divided by the field size
-before being applied. For drivers, the expected result of a pair includes the
+classified below it. Deltas are summed per entity, averaged over its n − 1
+opponents and scaled by 19/20 (`reference_field_size` = 20), so a race moves a
+rating by the same amount whatever the grid size, and exactly as much as the
+original divide-by-n on a 20-car grid. For drivers, the expected result of a pair includes the
 car: driver A vs driver B is predicted from `D_a + lam*C_a` vs `D_b + lam*C_b`
 (driver plus weighted constructor rating, `driver_car_weight` = 0.875). A win
 the car explains earns little, so car strength doesn't leak into driver
-ratings; teammates share a car, so for them only the drivers count. All
-K-factors and the car weight live in `config.py`.
+ratings; teammates share a car, so for them only the drivers count. Each
+side of a driver pair is also weighted by the other driver's confidence
+(0.6 against a newcomer, rising to 1 against a 100%-confidence driver), so
+results against part-timers with unsettled ratings count less, for wins and
+losses alike.
+
+Before about 1980 a make often ran many cars (works and privateer Maseratis
+share one constructor id, up to 15 in a race). A make's constructor update is
+the average over its cars (scaled to two cars) rather than the sum, and
+driver pairs within one make are weighted 1 / (cars − 1), so they add up to
+one teammate's worth. Each driver's race is averaged over the weight of
+comparisons they had, so it still moves them as far as anyone's race.
+Two-car teams are unaffected. All K-factors and the car
+weight live in `config.py`.
 
 ## Notes vs. the original notebook
 

@@ -26,6 +26,9 @@ RACES_CSV = "races.csv"
 RESULTS_CSV = "results.csv"
 CONSTRUCTORS_CSV = "constructors.csv"
 DRIVERS_CSV = "drivers.csv"
+# Optional: real qualifying positions (1994 onwards). Without it, the
+# qualifying pass falls back to the starting grid.
+QUALIFYING_CSV = "qualifying.csv"
 
 
 # ---------------------------------------------------------------------------
@@ -35,19 +38,23 @@ DRIVERS_CSV = "drivers.csv"
 class EloConfig:
     """Tunable parameters for the ELO model.
 
-    Defaults reproduce the behaviour of the original notebook.
+    Defaults are the backtested settings (backtest_constructors.py and
+    backtest_drivers.py, tuned on 1990-2022 with 2023 onwards held out). The
+    comments say which value restores the original notebook's behaviour.
     """
 
     initial_elo: float = 1000.0
 
-    # K-factors for constructors.
-    k_constructor_race: float = 52.0
-    k_constructor_quali: float = 18.0
+    # K-factors for constructors. Qualifying adds little to the car rating
+    # once real qualifying results are used (the race pass already captures
+    # pace), so its K is small outside an era start.
+    k_constructor_race: float = 45.0
+    k_constructor_quali: float = 7.0
 
     # Era-start boost for constructors. A big regulation change reshuffles
     # the order, so ratings need to move faster until they catch up. Each
     # season in `regulation_change_years` starts with an "era confidence" of
-    # 0%, rising by 1/era_start_races per race (10 races -> 10% per race).
+    # 0%, rising by 1/era_start_races per race (7 races -> about 14% per race).
     # The constructor K slides linearly from the era-start K below (at 0%)
     # to the normal K above (at 100%), like the driver confidence.
     # None = no boost (use the normal K). Drivers are unaffected.
@@ -64,28 +71,46 @@ class EloConfig:
         2026,  # new power units and active aero
     )
     # Races for the era confidence to reach 100%: round 1 uses the full
-    # era-start K, round 11 onwards the normal K.
-    era_start_races: int = 10
-    k_constructor_race_era_start: float | None = 60.0
-    k_constructor_quali_era_start: float | None = 24.0
+    # era-start K, round 8 onwards the normal K. Backtested together with the
+    # era-start K-factors below, on the regulation-change seasons 1998-2022.
+    # Right after a rule change qualifying is the quickest read of the new
+    # order, hence the large quali boost (79 vs a normal 7).
+    era_start_races: int = 7
+    k_constructor_race_era_start: float | None = 94.0
+    k_constructor_quali_era_start: float | None = 79.0
 
     # K-factors for drivers, scaled by a confidence level.
     # Confidence runs from 0 to driver_confidence_races "races' worth"
-    # (20 -> each race is 5%). The driver's K slides linearly from the rookie
-    # value at 0% to the veteran value at 100%, for both race and quali.
+    # (40 -> each race is 2.5%, about two seasons to full confidence). The
+    # driver's K slides linearly from the rookie value at 0% to the veteran
+    # value at 100%, for both race and quali (rookie = 2.75 x veteran).
     # After each race: a classified finish adds 1; a DNF takes 1 away; every
     # race a driver misses (once they've started at least one) takes 1 away.
-    # So a full season out (~20 races) brings a driver back to 0%.
-    driver_confidence_races: int = 20
+    # So a full season out (~22 races) takes away a little over half.
+    driver_confidence_races: int = 40
     # At the first race of each season in regulation_change_years, every
     # driver's confidence drops by this share of the full scale (0.5 = 50
-    # percentage points, i.e. 10 races' worth), never below 0%. New cars
+    # percentage points, i.e. 20 races' worth), never below 0%. New cars
     # mean even veterans' ratings should move faster for a while.
     era_start_confidence_drop: float = 0.5
-    k_driver_race_rookie: float = 112.0
-    k_driver_race_veteran: float = 56.0
-    k_driver_quali_rookie: float = 120.0
-    k_driver_quali_veteran: float = 60.0
+    k_driver_race_rookie: float = 187.0
+    k_driver_race_veteran: float = 68.0
+    k_driver_quali_rookie: float = 214.5
+    k_driver_quali_veteran: float = 78.0
+
+    # Opponent-confidence weight (drivers only). A result against a driver
+    # whose rating is still uncertain says less, so each side of a pair is
+    # weighted by the OTHER driver's confidence:
+    #     weight = floor + (1 - floor) * opponent_confidence   (0..1)
+    # A veteran who beats a 0%-confidence newcomer gains floor x as much,
+    # and loses floor x as much to one -- the same weight for a win and a
+    # loss, so a correctly rated driver doesn't drift. Against a 100%
+    # confident opponent the weight is 1. Your own confidence is already in
+    # your own K. Stops part-timers, who start at 1000 but are mostly worse,
+    # from feeding rating to the regulars who beat them.
+    # 1.0 = off (the original behaviour). 0.6 backtested best, clearly so on
+    # 1950-1979, where part-timers were common.
+    driver_opponent_confidence_floor: float = 0.6
 
     # Weight of the car in the driver expectation: driver A vs driver B is
     # predicted from (D_a + driver_car_weight * C_a) vs
@@ -93,8 +118,10 @@ class EloConfig:
     # only (the original behaviour, which lets car strength leak into driver
     # ratings: a driver in a dominant car keeps gaining for wins the car
     # earned). Teammate pairs are unaffected, since they share a car.
-    # Backtested on teammate pairs, 1990-2026: best around 0.875 (0.75-1
-    # effectively tied), with constructor_adjustment_exponent = 0.
+    # Backtested on teammate pairs, 1990-2022: 0.75-1 effectively tied;
+    # 0.875 is best on new-teammate pairs. Use it with
+    # constructor_adjustment_exponent = 0, so all of the car's effect is in
+    # this weight (the race predictions use D + driver_car_weight * C).
     driver_car_weight: float = 0.875
 
     # True: the driver passes use the constructor ratings from BEFORE that
@@ -116,14 +143,58 @@ class EloConfig:
     # rating is created or destroyed. Constructors still take the full
     # penalty (reliability is part of car strength); qualifying is
     # unaffected. 1.0 reproduces the original "DNF = last" behaviour.
-    driver_dnf_penalty_factor: float = 0.25
+    driver_dnf_penalty_factor: float = 0.4
+
+    # Field-size correction, for every pass (drivers and constructors,
+    # qualifying and race). Each entry's summed pair deltas are averaged
+    # over its n - 1 opponents, then scaled by (ref - 1) / ref, so a race
+    # moves ratings by the same amount whatever the grid size, and exactly
+    # as much as before on a grid of this many cars (K keeps its meaning).
+    # Without it, deltas are divided by the number of cars n, i.e. scaled
+    # by (n - 1) / n: a 10-car race moved ratings 5% less than a 20-car one.
+    # None = no correction (the original divide-by-n).
+    reference_field_size: int | None = 20
+
+    # Makes with more than two cars (common before 1980: the data identifies
+    # a car by its make, so works and privateer Maseratis or Coopers share one
+    # constructorId -- up to 15 in one race).
+    #
+    # Constructors: each make's update is the AVERAGE over its cars in that
+    # session, scaled to this many cars, instead of the sum. Every car counts
+    # equally, so a make's rating is its typical car, and a 10-car make no
+    # longer moves 5x as far per race as a 2-car team. With 2 every two-car
+    # team moves exactly as before; a one-car team moves as far as a two-car
+    # team whose cars did the same. None = the original sum over cars.
+    constructor_reference_cars: int | None = 2
+    # Drivers: pairs within one make share a car rating, so the car term
+    # cancels and the whole gap counts as driver skill -- wrong for a works
+    # driver beating privateers in an older car of the same make. With this
+    # on, every same-make pair is weighted 1 / (cars - 1): each driver's
+    # comparisons with their own make add up to one teammate's worth,
+    # however many cars it ran, all weighted equally. The driver's race is
+    # then averaged over the weight of comparisons they actually had
+    # (n - cars + 1 instead of n - 1), so a race moves them as far as anyone
+    # else's -- the same-make pairs only count less within it. Two-car
+    # teams are unchanged. False = every same-make pair at full weight
+    # (original).
+    driver_shared_make_weighting: bool = True
+
+    # Order the qualifying pass by the real qualifying result (qualifying.csv,
+    # 1994 onwards) instead of the starting grid. The grid includes penalties
+    # (engine, gearbox, pit-lane starts): 23.5% of entries since 1994 started
+    # somewhere other than where they qualified, so a penalised driver lost
+    # rating for it and the drivers moved up gained it. Races without
+    # qualifying data (all before 1994, a few after) still use the grid. In
+    # a race with data, a driver missing from it counts as no time (last).
+    # False = always the grid (the original behaviour).
+    use_qualifying_results: bool = True
 
     # Standard ELO logistic scale (the "400" in the classic formula).
     elo_scale: float = 400.0
 
     # Sentinels in the raw data.
     dnf_sentinel: str = "\\N"   # finishing "position" value for did-not-finish
-    no_grid_sentinel: int = 0    # "grid" value meaning no/last qualifying spot
+    no_grid_sentinel: int = 0    # "grid" / qualifying value meaning no time (last)
 
 
 # A ready-to-use default instance.

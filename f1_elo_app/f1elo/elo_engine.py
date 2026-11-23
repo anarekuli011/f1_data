@@ -4,19 +4,26 @@ This reproduces the algorithm from the original notebook, but as a single
 stateful class instead of a wall of global dicts and functions.
 
 How it works, per race:
-  1. QUALIFYING pass, ordered by grid position (0 = no qualifying time = last).
+  1. QUALIFYING pass, ordered by the real qualifying result (qualifying.csv,
+     1994 onwards; ``use_qualifying_results``), else by the starting grid
+     (0 = no qualifying time = last). The grid includes penalties, so it's
+     only the fallback.
      - Update constructor ratings (low K), then driver ratings (low K).
   2. RACE pass, ordered by finishing position ("\\N" = DNF = last).
      - Update constructor ratings (high K), then driver ratings (high K).
      - Drivers only: a classified-vs-DNF pair is scaled by
-       ``driver_dnf_penalty_factor`` (default 0.25), so a retirement costs
-       the driver a quarter as much. Constructors take the full penalty.
+       ``driver_dnf_penalty_factor`` (default 0.4), so a retirement costs
+       the driver 40% as much. Constructors take the full penalty.
 
 Within each pass it does a full pairwise comparison: every entry is treated as
 having "beaten" every entry classified below it (score 1 vs 0). The per-entry
-ELO deltas are accumulated across all pairs, then divided by the size of the
-field before being applied -- so a single race moves a rating by roughly one
-K-step, not N of them.
+ELO deltas are accumulated across all pairs, then averaged over the n - 1
+opponents and scaled by (ref - 1) / ref, with ref = ``reference_field_size``
+(20) -- so a single race moves a rating by roughly one K-step, not N of them,
+and by the same amount on any grid size (exactly as before on 20 cars).
+With ``reference_field_size = None`` the deltas are divided by n instead,
+the original behaviour, which moved ratings 5% less on a 10-car grid than on
+a 20-car one.
 
 Driver pairs are predicted from driver AND car strength: the expected result
 of driver A vs driver B is ``expected_score(D_a + lam*C_a, D_b + lam*C_b)``,
@@ -28,13 +35,37 @@ into the driver rating. Teammates share C, so for them only D matters.
 Updates can also be scaled by ``(C_b / C_a) ** constructor_adjustment_exponent``
 (an older, cruder way to discount wins in a better car; 0 turns it off).
 
-Driver K-factors depend on a confidence level (0-20 races' worth, 5% per
+Driver K-factors depend on a confidence level (0-40 races' worth, 2.5% per
 race): rookie K at 0%, veteran K at 100%, linear in between. A classified
 finish adds a race of confidence; a DNF or a missed race takes one away. At
 the first race of a regulation-change season, every driver loses
 ``era_start_confidence_drop`` (50 percentage points) of confidence.
+
+Each side of a driver pair is also weighted by the OTHER driver's confidence:
+``floor + (1 - floor) * opponent_confidence`` with floor
+``driver_opponent_confidence_floor`` (0.6). A result against a newcomer,
+whose rating is still a guess, counts less -- for a win and a loss alike, so
+a correctly rated driver doesn't drift. This stops part-timers, who start at
+1000 but are mostly worse, from feeding rating to the regulars who beat them.
+
+Makes with more than two cars (common before 1980, when works and privateer
+cars of one make share a constructorId):
+  - Constructors: a make's update is the average over its cars in that
+    session, scaled to ``constructor_reference_cars`` (2), not the sum. Every
+    car counts equally, and a 10-car make no longer moves 5x as far as a
+    2-car team.
+  - Drivers: with ``driver_shared_make_weighting``, each same-make pair is
+    weighted 1 / (cars - 1), so a driver's comparisons with their own make
+    add up to one teammate's worth. The car term cancels in those pairs, so
+    without this a works driver beating a field of privateers in older cars
+    of the same make got the whole car gap as driver credit. The driver's
+    race is averaged over the weight of comparisons they had (n - cars + 1,
+    not n - 1), so it moves them as far as anyone's race.
+Two-car teams are unaffected by both.
 """
 from __future__ import annotations
+
+from collections import Counter
 
 import pandas as pd
 
@@ -103,6 +134,14 @@ class EloEngine:
             return 1.0
         return min(self.driver_confidence.get(driver_id, 0), n) / n
 
+    def _opponent_weight(self, opponent_id) -> float:
+        """How much a result against this opponent counts: the configured
+        floor at 0% opponent confidence, rising linearly to 1 at 100%."""
+        floor = self.cfg.driver_opponent_confidence_floor
+        if floor >= 1.0:
+            return 1.0
+        return floor + (1.0 - floor) * self.confidence_pct(opponent_id)
+
     def _k_driver(self, driver_id, is_race: bool) -> float:
         """Slide linearly from the rookie K (0%) to the veteran K (100%)."""
         c = self.cfg
@@ -159,13 +198,28 @@ class EloEngine:
         highest[a] = max(highest[a], new_ra)
         highest[b] = max(highest[b], new_rb)
 
-    @staticmethod
-    def _apply(ratings: dict, changes: dict, field_size: int) -> None:
-        """Apply accumulated deltas, normalised by the size of the field."""
+    def _field_divisor(self, field_size: int) -> float:
+        """What a pass's summed deltas are divided by.
+
+        With ``reference_field_size`` set: (n - 1) * ref / (ref - 1), i.e. the
+        average over the n - 1 opponents, scaled by (ref - 1) / ref. That is
+        exactly n on a reference-size grid, so K keeps its meaning there,
+        and the size of the field no longer changes how far a rating moves.
+        Without it: n, the original behaviour.
+        """
+        ref = self.cfg.reference_field_size
+        if ref is None or ref < 2 or field_size < 2:
+            return float(field_size)
+        return (field_size - 1) * ref / (ref - 1)
+
+    def _apply(self, ratings: dict, changes: dict, field_size: int) -> None:
+        """Apply accumulated deltas, normalised by the size of the field
+        (see ``_field_divisor``)."""
         if field_size == 0:
             return
+        divisor = self._field_divisor(field_size)
         for entity_id, delta in changes.items():
-            ratings[entity_id] = ratings.get(entity_id, 0.0) + delta / field_size
+            ratings[entity_id] = ratings.get(entity_id, 0.0) + delta / divisor
 
     # -- pairwise passes ---------------------------------------------------
     def _constructor_pass(self, order: pd.DataFrame, col: str, sentinel,
@@ -201,6 +255,15 @@ class EloEngine:
                     self.constructor_race_count.get(a, 0) + 1
                 )
 
+        # Average each make over its cars (scaled to the reference number),
+        # instead of summing them: a 10-car make moves no further per race
+        # than a 2-car team, and every car counts equally.
+        ref = cfg.constructor_reference_cars
+        if ref:
+            cars = Counter(ids)
+            for c in changes:
+                changes[c] *= ref / cars[c]
+
         self._apply(self.constructor_elo, changes, n)
 
     def _driver_pass(self, order: pd.DataFrame, col: str, sentinel,
@@ -218,6 +281,16 @@ class EloEngine:
         constructor_ids = order["constructorId"].tolist()
         vals = order[col].tolist()
         n = len(driver_ids)
+        # Cars per make in this session, for weighting same-make pairs.
+        cars = Counter(constructor_ids) if cfg.driver_shared_make_weighting else None
+        # Down-weighting a k-car make's same-make pairs leaves its drivers
+        # n - k + 1 comparisons' worth instead of n - 1. Scale them back up,
+        # so the race is a weighted AVERAGE over opponents: the same-make
+        # pairs count less within it, but the race moves the driver as far
+        # as anyone else's. 1 for two-car teams (and with the option off).
+        rescale = [(n - 1) / (n - cars[c] + 1)
+                   if cars is not None and cars[c] > 2 else 1.0
+                   for c in constructor_ids]
 
         changes: dict = {}
         for i in range(n):
@@ -232,8 +305,11 @@ class EloEngine:
                 con_ra = car_elo[ca]
                 con_rb = car_elo[cb]
 
-                k_a = self._k_driver(a, is_race)
-                k_b = self._k_driver(b, is_race)
+                # Own K from own confidence, weighted by the OTHER driver's
+                # confidence: a result against an uncertain rating counts
+                # less, for a win and a loss alike.
+                k_a = self._k_driver(a, is_race) * self._opponent_weight(b)
+                k_b = self._k_driver(b, is_race) * self._opponent_weight(a)
                 # Expected result from driver + weighted car strength, so a
                 # win the car explains earns little (teammates: same car).
                 ea = expected_score(ra + lam * con_ra, rb + lam * con_rb,
@@ -251,8 +327,16 @@ class EloEngine:
                 dnf = (cfg.driver_dnf_penalty_factor
                        if is_race and vb == sentinel else 1.0)
 
-                new_ra = ra + k_a * (1 - ea) * adj * dnf   # sa = 1
-                new_rb = rb + k_b * (0 - eb) * adj * dnf    # sb = 0
+                # Same make, more than two cars (works + privateers sharing
+                # one car rating): weight each pair 1 / (cars - 1), so a
+                # driver's same-make comparisons add up to one teammate's
+                # worth. Two-car teams: weight 1, as before.
+                mate = (1.0 / (cars[ca] - 1)
+                        if cars is not None and ca == cb and cars[ca] > 2 else 1.0)
+
+                w = adj * dnf * mate
+                new_ra = ra + k_a * (1 - ea) * w * rescale[i]   # sa = 1
+                new_rb = rb + k_b * (0 - eb) * w * rescale[j]   # sb = 0
                 self._record(changes, self.highest_driver,
                              a, b, new_ra, new_rb, ra, rb)
 
@@ -263,13 +347,28 @@ class EloEngine:
 
     # -- per-race orchestration -------------------------------------------
     @staticmethod
-    def _order_by_grid(race: pd.DataFrame, no_grid_sentinel: int) -> pd.DataFrame:
-        """Sort a race's entries by grid, pushing 'no grid' (0) to the back."""
+    def _order_by_quali(race: pd.DataFrame, cfg: EloConfig) -> pd.DataFrame:
+        """Sort a race's entries into qualifying order, in a ``quali_rank``
+        column (the qualifying pass's ordering column).
+
+        With ``use_qualifying_results`` and qualifying data for the race:
+        the real qualifying position, a driver missing from it counting as
+        no time. Otherwise the starting grid. No time / no grid slot is the
+        sentinel (0) and goes to the back.
+        """
         r = race.copy()
-        max_grid = r["grid"].max()
-        r["_grid_sort"] = r["grid"].replace(no_grid_sentinel, max_grid + 1)
-        r = r.sort_values(by="_grid_sort")
-        return r.drop(columns="_grid_sort")
+        sentinel = cfg.no_grid_sentinel
+        qp = r["quali_position"] if "quali_position" in r.columns else None
+        if cfg.use_qualifying_results and qp is not None and qp.notna().any():
+            r["quali_rank"] = qp.fillna(sentinel).astype(int)
+        else:
+            r["quali_rank"] = r["grid"].astype(int)
+        last = r["quali_rank"].max() + 1
+        r["_sort"] = r["quali_rank"].replace(sentinel, last)
+        # Same (default) sort as the original grid ordering, so ties -- two
+        # cars on one grid slot, in 105 old races -- break the same way.
+        r = r.sort_values(by="_sort")
+        return r.drop(columns="_sort")
 
     @staticmethod
     def _order_by_position(race: pd.DataFrame) -> pd.DataFrame:
@@ -288,7 +387,7 @@ class EloEngine:
         cfg = self.cfg
         self.process_ordered(
             int(race["year"].iloc[0]), int(race["round"].iloc[0]),
-            self._order_by_grid(race, cfg.no_grid_sentinel),
+            self._order_by_quali(race, cfg),
             self._order_by_position(race),
         )
         return race, dict(self.constructor_elo), dict(self.driver_elo)
@@ -297,9 +396,10 @@ class EloEngine:
                         race_order: pd.DataFrame) -> None:
         """Process one race whose entries are already sorted.
 
-        ``quali_order`` is sorted by grid and ``race_order`` by finishing
-        position; both need driverId, constructorId and grid / position.
-        Backtests call this directly so they share the exact same logic.
+        ``quali_order`` comes from ``_order_by_quali`` (sorted, with a
+        ``quali_rank`` column) and ``race_order`` from ``_order_by_position``;
+        both need driverId and constructorId. Backtests call this directly so
+        they share the exact same logic.
         """
         cfg = self.cfg
         self.era_conf = self.era_confidence(year, rnd)
@@ -316,11 +416,12 @@ class EloEngine:
         # them), or the freshly updated ones.
         snap = dict if cfg.driver_car_before_update else (lambda d: None)
 
-        # ----- QUALIFYING (low K), ordered by grid -----
+        # ----- QUALIFYING (low K), ordered by qualifying result -----
         cars = snap(self.constructor_elo)
-        self._constructor_pass(quali_order, "grid", cfg.no_grid_sentinel, is_race=False)
-        self._driver_pass(quali_order, "grid", cfg.no_grid_sentinel, is_race=False,
-                          car_elo=cars)
+        self._constructor_pass(quali_order, "quali_rank", cfg.no_grid_sentinel,
+                               is_race=False)
+        self._driver_pass(quali_order, "quali_rank", cfg.no_grid_sentinel,
+                          is_race=False, car_elo=cars)
 
         # ----- RACE (high K), ordered by finishing position -----
         cars = snap(self.constructor_elo)

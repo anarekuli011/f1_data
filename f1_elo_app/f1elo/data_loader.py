@@ -41,7 +41,8 @@ def build_race_frame(data_dir: Path | str | None = None) -> pd.DataFrame:
 
     The returned frame has (at least) these columns:
         raceId, driverId, constructorId, grid, position, points,
-        year, round, name (race name), date (datetime)
+        year, round, name (race name), date (datetime),
+        quali_position (real qualifying position; NaN if unknown)
     plus an empty ``EloRating`` / ``DriverEloRating`` column ready to be filled
     by the engine.
     """
@@ -54,6 +55,18 @@ def build_race_frame(data_dir: Path | str | None = None) -> pd.DataFrame:
     race_cols = [c for c in race_cols if c in races.columns]
 
     df = results.merge(races[race_cols], on="raceId", how="left")
+
+    # Real qualifying position (qualifying.csv, 1994 onwards), as
+    # ``quali_position``; NaN where there is none. The engine's qualifying
+    # pass uses it instead of the penalty-affected grid when a race has it.
+    qpath = Path(data_dir if data_dir is not None else config.DATA_DIR) / config.QUALIFYING_CSV
+    if qpath.exists():
+        q = pd.read_csv(qpath, usecols=["raceId", "driverId", "position"])
+        q = q.groupby(["raceId", "driverId"], as_index=False)["position"].min()
+        df = df.merge(q.rename(columns={"position": "quali_position"}),
+                      on=["raceId", "driverId"], how="left")
+    else:
+        df["quali_position"] = float("nan")
 
     # Chronological order: year, then round within the year.
     sort_cols = [c for c in ("year", "round") if c in df.columns]
