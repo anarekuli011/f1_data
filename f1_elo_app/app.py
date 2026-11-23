@@ -108,7 +108,10 @@ def load(mtimes: tuple):
 # grid comparisons and the team ones (drivers view only) start hidden.
 BASE_COLUMNS = ["Start", "End", "Grid median at end", "End vs grid", "End vs grid %",
                 "End pos score", "Change", "Peak", "Grid median at peak", "Peak vs grid",
-                "Peak vs grid %", "Peak pos score", "Peak at", "Races"]
+                "Peak vs grid %", "Peak pos score", "Peak at",
+                "Best season", "Best season avg", "Grid median (best season)",
+                "Best season vs grid", "Best season vs grid %", "Season pos score",
+                "Races"]
 
 # Positional scores: the average of a row's positions (1 = highest) by a
 # rating and its gap to the grid median, within the list as shown (after the
@@ -121,6 +124,7 @@ POS_SCORES = {
     "End pos score": ("End", "End vs grid"),
     "Peak pos score": ("Peak", "Peak vs grid"),
     "Peak team pos score": ("Peak team rating", "Peak team vs grid"),
+    "Season pos score": ("Best season avg", "Best season vs grid"),
 }
 POS_HELP = ("The average of this row's positions in the list shown (1 = highest) "
             "by {a} and {b}: how high the rating was, and how far above the "
@@ -138,7 +142,20 @@ BASE_HELP = {
                            "peak was reached, each {one} counted once.",
     "Peak vs grid": "Peak minus Grid median at peak: how far above the typical "
                     "{one} they stood at their best.",
+    "Best season": "The season with the highest average rating (within the "
+                   "period). A season only counts if the {one} took part in at "
+                   "least half of its races; blank if none qualifies.",
+    "Best season avg": "The average rating after each race of the best season: "
+                       "how high they stayed for a whole season, not just one race.",
+    "Grid median (best season)": "The grid median averaged over the same races "
+                                 "(each {one} counted once per race).",
+    "Best season vs grid": "Best season avg minus Grid median (best season): how "
+                           "far above the typical {one} they stood across that "
+                           "season.",
 }
+# A season counts for "best season" only with at least this share of its
+# races (within the period), so a one-off drive can't be someone's best.
+MIN_SEASON_SHARE = 0.5
 # The "%" columns turn a gap to the grid median into the model's own win
 # chance: expected_score on the engine's 400 scale. For drivers the cars
 # cancel (same car), so it reads as head-to-head driver skill.
@@ -150,12 +167,35 @@ WIN_HELP = {
                     "gap {when} (the model's own win chance: 50% = typical, 76% = "
                     "wins about 3 in 4, 90% = 9 in 10).",
 }
-WIN_WHEN = {"End vs grid %": "at the end", "Peak vs grid %": "at the peak"}
+WIN_WHEN = {"End vs grid %": "at the end", "Peak vs grid %": "at the peak",
+            "Best season vs grid %": "averaged over the best season"}
 
 
-def win_chance(gap: float) -> int:
-    """Chance, in whole percent, of beating someone rated `gap` points lower."""
+def win_chance(gap: float) -> int | None:
+    """Chance, in whole percent, of beating someone rated `gap` points lower
+    (None when there is no gap, e.g. no qualifying best season)."""
+    if pd.isna(gap):
+        return None
     return round(100 * expected_score(gap, 0.0, config.DEFAULT_CONFIG.elo_scale))
+
+
+def best_season(g: pd.DataFrame, season_races: dict) -> dict:
+    """The season with the highest average rating among those where this
+    driver (or team) did at least MIN_SEASON_SHARE of the races; blank values
+    when none qualifies."""
+    by = g.groupby("year").agg(n=("rating", "size"), avg=("rating", "mean"),
+                               grid=("grid_median", "mean"))
+    by = by[by["n"] >= MIN_SEASON_SHARE * by.index.map(season_races)]
+    if by.empty:
+        return {"Best season": None, "Best season avg": None,
+                "Grid median (best season)": None, "Best season vs grid": None,
+                "Best season vs grid %": None}
+    year = by["avg"].idxmax()
+    avg, grid = by.loc[year, "avg"], by.loc[year, "grid"]
+    return {"Best season": str(year), "Best season avg": round(avg),
+            "Grid median (best season)": round(grid),
+            "Best season vs grid": round(avg - grid),
+            "Best season vs grid %": win_chance(avg - grid)}
 
 
 TEAM_COLUMNS = ["Current team", "Current team: peak", "Current team: end",
@@ -190,7 +230,10 @@ def _stint_figures(stint: pd.DataFrame) -> tuple:
 
 
 def summary(view: pd.DataFrame, labels: dict, column: str,
-            team_names: dict | None = None) -> pd.DataFrame:
+            team_names: dict | None = None,
+            season_races: dict | None = None) -> pd.DataFrame:
+    """One row per driver (or team). season_races: races per season within
+    the period, for the best-season rule."""
     rows = []
     for eid, g in view.groupby("id"):
         peak = g.loc[g["rating"].idxmax()]
@@ -204,6 +247,8 @@ def summary(view: pd.DataFrame, labels: dict, column: str,
                "Grid median at peak": round(peak["grid_median"]),
                "Peak vs grid": round(peak_gap), "Peak vs grid %": win_chance(peak_gap),
                "Peak at": f"{peak['name']} {peak['year']}", "Races": len(g)}
+        if season_races is not None:
+            row.update(best_season(g, season_races))
         if "team" in g.columns:
             # Stints: runs of consecutive races (in this period) with one team.
             g = g.sort_values("pos")
@@ -448,13 +493,15 @@ rank_by = state["rank_by"]
 
 # The table, ranked and filtered (the Rank by control is drawn under the
 # chart, but its value is known now). The chart shows the same rows.
-table = summary(view, labels, cfg["column"], team_names)
+season_races = shown_races.groupby("year").size().to_dict()  # within the period
+table = summary(view, labels, cfg["column"], team_names, season_races)
 in_period = len(table)
 if state[f"{v}:min_on"]:
     table = table[table["Races"] >= state[f"{v}:min_races"]]
 if state[f"{v}:top_on"]:
     # The list's boundary: the top N by a rating. Ranking by a positional
     # score cuts by its rating (Peak pos score -> Peak), then reorders.
+    # Rows with no value to cut by (no qualifying best season) drop out.
     cut_by = POS_SCORES[rank_by][0] if rank_by in POS_SCORES else rank_by
     table = table[table[cut_by].rank(method="min", ascending=False) <= state[f"{v}:top_n"]]
 # Positional scores, relative to the list as it now stands.
@@ -463,8 +510,9 @@ for score, cols in POS_SCORES.items():
         table[score] = sum(table[c].rank(method="min", ascending=False)
                            for c in cols) / len(cols)
 low_first = rank_by in POS_SCORES  # a lower score is better
-table = table.sort_values(rank_by, ascending=low_first)
-table.insert(0, "#", table[rank_by].rank(method="min", ascending=low_first).astype(int))
+table = table.sort_values(rank_by, ascending=low_first)  # blanks go last
+table.insert(0, "#", table[rank_by].rank(method="min", ascending=low_first,
+                                         na_option="bottom").astype(int))
 filtered_out = in_period - len(table)
 if table.empty:
     st.warning(f"The filters leave no {cfg['many']} to show. Lower the minimum "
@@ -561,6 +609,14 @@ for c in ("End vs grid", "Peak vs grid"):
         help=BASE_HELP[c].format(one=cfg["one"]), format="%+d")
 col_config["Peak team vs grid"] = st.column_config.NumberColumn(
     help=TEAM_HELP["Peak team vs grid"], format="%+d")
+# Best season: can be blank, so give whole-number formats explicitly.
+col_config["Best season"] = st.column_config.TextColumn(
+    help=BASE_HELP["Best season"].format(one=cfg["one"]))
+for c in ("Best season avg", "Grid median (best season)"):
+    col_config[c] = st.column_config.NumberColumn(
+        help=BASE_HELP[c].format(one=cfg["one"]), format="%d")
+col_config["Best season vs grid"] = st.column_config.NumberColumn(
+    help=BASE_HELP["Best season vs grid"].format(one=cfg["one"]), format="%+d")
 # Win chances, stored as whole percentages (0-100).
 for c, when in WIN_WHEN.items():
     col_config[c] = st.column_config.NumberColumn(
