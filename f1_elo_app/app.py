@@ -103,10 +103,12 @@ def load(mtimes: tuple):
     return out, races, team_names, latest_medians
 
 
-# Table columns that can be shown or hidden, in display order. The base ones
-# are shown by default; the team ones (drivers view only) start hidden.
+# Table columns that can be shown or hidden, in display order. Only
+# DEFAULT_COLUMNS start shown (and come back with "Default columns"); the
+# grid comparisons and the team ones (drivers view only) start hidden.
 BASE_COLUMNS = ["Start", "End", "Grid median", "End vs grid", "End vs grid %",
                 "Change", "Peak", "Peak vs grid", "Peak vs grid %", "Peak at", "Races"]
+DEFAULT_COLUMNS = ["Start", "End", "Change", "Peak", "Peak at", "Races"]
 BASE_HELP = {
     "Grid median": "The median rating of the grid after the race where End was "
                    "taken (the row's last race in the period), each {one} counted "
@@ -482,7 +484,7 @@ st.caption(f"Showing {shown} {cfg['many']}" + (f" ({'; '.join(notes)})" if notes
            "double-click to zoom back out.")
 
 optional = BASE_COLUMNS + (TEAM_COLUMNS if v == "drivers" else [])
-state.setdefault(f"{v}:columns", list(BASE_COLUMNS))
+state.setdefault(f"{v}:columns", list(DEFAULT_COLUMNS))
 # Drop column names that no longer exist (a session from an older version).
 state[f"{v}:columns"] = [c for c in state[f"{v}:columns"] if c in optional]
 
@@ -498,7 +500,7 @@ with st.container(horizontal=True, vertical_alignment="bottom", gap="medium"):
         st.pills("Shown columns", optional, selection_mode="multi", key=f"{v}:columns",
                  help="Pick the columns to show. The rank and name are always shown.")
         st.button("Default columns", key=f"{v}:columns_default", width="stretch",
-                  on_click=lambda key=f"{v}:columns": state.update({key: list(BASE_COLUMNS)}))
+                  on_click=lambda key=f"{v}:columns": state.update({key: list(DEFAULT_COLUMNS)}))
 # The table's hover toolbar floats just above its top edge; keep it clear of
 # the controls when they span the full width (phones).
 st.space("small")
