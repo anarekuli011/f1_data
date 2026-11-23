@@ -106,18 +106,20 @@ def load(mtimes: tuple):
 # Table columns that can be shown or hidden, in display order. Only
 # DEFAULT_COLUMNS start shown (and come back with "Default columns"); the
 # grid comparisons and the team ones (drivers view only) start hidden.
-BASE_COLUMNS = ["Start", "End", "Grid median", "End vs grid", "End vs grid %",
-                "Change", "Peak", "Peak vs grid", "Peak vs grid %", "Peak at", "Races"]
+BASE_COLUMNS = ["Start", "End", "Grid median at end", "End vs grid", "End vs grid %",
+                "Change", "Peak", "Grid median at peak", "Peak vs grid",
+                "Peak vs grid %", "Peak at", "Races"]
 DEFAULT_COLUMNS = ["Start", "End", "Change", "Peak", "Peak at", "Races"]
 BASE_HELP = {
-    "Grid median": "The median rating of the grid after the race where End was "
-                   "taken (the row's last race in the period), each {one} counted "
-                   "once.",
-    "End vs grid": "End minus Grid median: how far above (+) or below (-) the "
-                   "typical {one} on the grid at that moment.",
-    "Peak vs grid": "Peak minus the median rating of the grid after the race where "
-                    "the peak was reached (each {one} counted once): how far above "
-                    "the typical {one} they stood at their best.",
+    "Grid median at end": "The median rating of the grid after the race where End "
+                          "was taken (the row's last race in the period), each "
+                          "{one} counted once.",
+    "End vs grid": "End minus Grid median at end: how far above (+) or below (-) "
+                   "the typical {one} on the grid at that moment.",
+    "Grid median at peak": "The median rating of the grid after the race where the "
+                           "peak was reached, each {one} counted once.",
+    "Peak vs grid": "Peak minus Grid median at peak: how far above the typical "
+                    "{one} they stood at their best.",
 }
 # The "%" columns turn a gap to the grid median into the model's own win
 # chance: expected_score on the engine's 400 scale. For drivers the cars
@@ -140,7 +142,7 @@ def win_chance(gap: float) -> int:
 
 TEAM_COLUMNS = ["Current team", "Current team: peak", "Current team: end",
                 "Current team: change", "Peak team", "Peak team rating",
-                "Peak team vs grid", "Peak team vs grid %"]
+                "Team grid median at peak", "Peak team vs grid", "Peak team vs grid %"]
 TEAM_HELP = {
     "Current team": "The team in the driver's last race of the period.",
     "Current team: peak": "That team's highest rating during the driver's current "
@@ -151,9 +153,11 @@ TEAM_HELP = {
     "Peak team": "The team the driver was racing for when they reached their peak.",
     "Peak team rating": "That team's rating at the moment the driver peaked "
                         "(after the same race).",
-    "Peak team vs grid": "How far that team's rating was above (+) or below (-) the "
-                         "grid's median team in the same race, each team counted "
-                         "once. Positive = a better car than the typical one.",
+    "Team grid median at peak": "The median team rating of the grid after the race "
+                                "where the driver peaked, each team counted once.",
+    "Peak team vs grid": "Peak team rating minus Team grid median at peak: how far "
+                         "above (+) or below (-) the typical team that car was. "
+                         "Positive = a better car than the typical one.",
     "Peak team vs grid %": "The chance of that car beating the grid's median car "
                            "at the driver's peak, from the rating gap (the model's "
                            "own win chance: 50% = typical, 90% = 9 in 10).",
@@ -175,9 +179,10 @@ def summary(view: pd.DataFrame, labels: dict, column: str,
         grid = g["grid_median"].iloc[-1]  # the grid when End was taken
         peak_gap = peak["rating"] - peak["grid_median"]
         row = {column: labels[eid], "Start": round(start), "End": round(end),
-               "Grid median": round(grid), "End vs grid": round(end - grid),
+               "Grid median at end": round(grid), "End vs grid": round(end - grid),
                "End vs grid %": win_chance(end - grid),
                "Change": round(end - start), "Peak": round(peak["rating"]),
+               "Grid median at peak": round(peak["grid_median"]),
                "Peak vs grid": round(peak_gap), "Peak vs grid %": win_chance(peak_gap),
                "Peak at": f"{peak['name']} {peak['year']}", "Races": len(g)}
         if "team" in g.columns:
@@ -195,6 +200,7 @@ def summary(view: pd.DataFrame, labels: dict, column: str,
             row["Peak team"] = team_names.get(peak["team"], peak["team"])
             row["Peak team rating"] = round(peak["team_rating"])
             team_gap = peak["team_rating"] - peak["team_grid_median"]
+            row["Team grid median at peak"] = round(peak["team_grid_median"])
             row["Peak team vs grid"] = round(team_gap)
             row["Peak team vs grid %"] = win_chance(team_gap)
         rows.append(row)
@@ -508,8 +514,8 @@ st.space("small")
 shown_cols = [c for c in optional if c in state[f"{v}:columns"]]
 col_config = {"#": st.column_config.NumberColumn(width="small", pinned=True)}
 col_config.update({c: st.column_config.Column(help=h) for c, h in TEAM_HELP.items()})
-col_config["Grid median"] = st.column_config.NumberColumn(
-    help=BASE_HELP["Grid median"].format(one=cfg["one"]))
+for c in ("Grid median at end", "Grid median at peak"):
+    col_config[c] = st.column_config.NumberColumn(help=BASE_HELP[c].format(one=cfg["one"]))
 # Above or below the grid: show the sign (+191 / -42).
 for c in ("End vs grid", "Peak vs grid"):
     col_config[c] = st.column_config.NumberColumn(
