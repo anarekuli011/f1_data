@@ -150,14 +150,29 @@ def update(progress=print, session=None) -> dict:
     from f1data.export import export_csv  # noqa: E402
     from f1data.ingest import run  # noqa: E402
 
-    # Fail fast when offline; the client's long back-offs are meant for throttling.
+    # Fail fast when offline or when Jolpica is down; the client's long
+    # back-offs are meant for throttling. Tell the two apart: a server that
+    # accepts the connection but never answers is Jolpica's problem, not the
+    # user's connection.
     session = session or requests.Session()
     try:
-        session.get(f"{BASE_URL}/seasons.json?limit=1&offset=0",
-                    headers={"User-Agent": USER_AGENT}, timeout=15)
+        check = session.get(f"{BASE_URL}/seasons.json?limit=1&offset=0",
+                            headers={"User-Agent": USER_AGENT}, timeout=15)
+    except requests.ReadTimeout as exc:
+        raise UpdateError("The Jolpica API isn't responding: it accepted the "
+                          "connection but sent no reply within 15 seconds. It's "
+                          "probably busy or down for a while (common right after "
+                          "a race weekend). Your connection is fine; try again "
+                          "later.") from exc
+    except requests.ConnectionError as exc:
+        raise UpdateError("Couldn't connect to the Jolpica API. Check your "
+                          "internet connection and try again.") from exc
     except requests.RequestException as exc:
-        raise UpdateError("Couldn't reach the Jolpica API. Check your internet "
-                          "connection and try again.") from exc
+        raise UpdateError(f"The Jolpica API check failed ({type(exc).__name__}). "
+                          "Try again later.") from exc
+    if check.status_code >= 500:
+        raise UpdateError(f"The Jolpica API is having problems (HTTP "
+                          f"{check.status_code}). Try again later.")
 
     # Show the client's retry warnings (e.g. throttling) as progress messages.
     class _Forward(logging.Handler):
