@@ -379,19 +379,22 @@ st.caption(f"Showing {shown} {cfg['many']}" + (f" ({'; '.join(notes)})" if notes
 optional = BASE_COLUMNS + (TEAM_COLUMNS if v == "drivers" else [])
 state.setdefault(f"{v}:columns", list(BASE_COLUMNS))
 
-# Columns sits next to Rank by, on the left: the table's own toolbar appears
-# over its top-right corner on hover.
-rank_col, cols_col, _ = st.columns([2, 1, 4], vertical_alignment="bottom")
-with rank_col:
+# Columns sits next to Rank by, on the left. A horizontal container sizes
+# both to their content and wraps Columns onto the next line when space
+# runs out, so they never overlap (fixed-ratio columns squeezed it on
+# narrow pages).
+with st.container(horizontal=True, vertical_alignment="bottom", gap="medium"):
     rank_by = choice("Rank by", ["End", "Peak", "Change"], "rank_by",
                      help="Orders the table and numbers each row by this column. "
                           "Equal values share a position.")
-with cols_col:
-    with st.popover("Columns", width="stretch"):
+    with st.popover("Columns", width="content"):
         st.pills("Shown columns", optional, selection_mode="multi", key=f"{v}:columns",
                  help="Pick the columns to show. The rank and name are always shown.")
         st.button("Default columns", key=f"{v}:columns_default", width="stretch",
                   on_click=lambda key=f"{v}:columns": state.update({key: list(BASE_COLUMNS)}))
+# The table's hover toolbar floats just above its top edge; keep it clear of
+# the controls when they span the full width (phones).
+st.space("small")
 
 table = summary(view, labels, cfg["column"], team_names).sort_values(rank_by, ascending=False)
 table.insert(0, "#", table[rank_by].rank(method="min", ascending=False).astype(int))
