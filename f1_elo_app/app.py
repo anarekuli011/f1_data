@@ -106,13 +106,16 @@ def load(mtimes: tuple):
 # Table columns that can be shown or hidden, in display order. The base ones
 # are shown by default; the team ones (drivers view only) start hidden.
 BASE_COLUMNS = ["Start", "End", "Grid median", "End vs grid", "Change", "Peak",
-                "Peak at", "Races"]
+                "Peak vs grid", "Peak at", "Races"]
 BASE_HELP = {
     "Grid median": "The median rating of the grid after the race where End was "
                    "taken (the row's last race in the period), each {one} counted "
                    "once.",
     "End vs grid": "End minus Grid median: how far above (+) or below (-) the "
                    "typical {one} on the grid at that moment.",
+    "Peak vs grid": "Peak minus the median rating of the grid after the race where "
+                    "the peak was reached (each {one} counted once): how far above "
+                    "the typical {one} they stood at their best.",
 }
 TEAM_COLUMNS = ["Current team", "Current team: peak", "Current team: end",
                 "Current team: change", "Peak team", "Peak team rating",
@@ -149,6 +152,7 @@ def summary(view: pd.DataFrame, labels: dict, column: str,
         row = {column: labels[eid], "Start": round(start), "End": round(end),
                "Grid median": round(grid), "End vs grid": round(end - grid),
                "Change": round(end - start), "Peak": round(peak["rating"]),
+               "Peak vs grid": round(peak["rating"] - peak["grid_median"]),
                "Peak at": f"{peak['name']} {peak['year']}", "Races": len(g)}
         if "team" in g.columns:
             # Stints: runs of consecutive races (in this period) with one team.
@@ -481,6 +485,8 @@ config["Grid median"] = st.column_config.NumberColumn(
 # Above or below the grid: show the sign (+191 / -42).
 config["End vs grid"] = st.column_config.NumberColumn(
     help=BASE_HELP["End vs grid"].format(one=cfg["one"]), format="%+d")
+config["Peak vs grid"] = st.column_config.NumberColumn(
+    help=BASE_HELP["Peak vs grid"].format(one=cfg["one"]), format="%+d")
 config["Peak team vs grid"] = st.column_config.NumberColumn(
     help=TEAM_HELP["Peak team vs grid"], format="%+d")
 st.dataframe(table, hide_index=True, width="stretch",
