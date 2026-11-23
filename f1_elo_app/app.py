@@ -57,6 +57,15 @@ def load(mtimes: tuple):
                       + " · " + races["name"])
     races = races.set_index("raceId")
 
+    # The grid's typical team in each race: the median team rating after the
+    # race, each team counted once (a 15-car make is still one team). Median
+    # rather than mean: ratings are right-skewed (a dominant team or two sits
+    # far above the rest), which pulls the mean up by 8-38 points on average
+    # and makes the dominant car itself look less dominant. Being above the
+    # median means being expected to beat more than half the teams.
+    grid_median = (res.drop_duplicates(["raceId", "constructorId"])
+                      .groupby("raceId")["EloRating"].median())
+
     out = {}
     for view, cfg in VIEWS.items():
         # One row per driver (or team) per race: teammates share the team rating,
@@ -64,9 +73,11 @@ def load(mtimes: tuple):
         frame = res.drop_duplicates(["raceId", cfg["id"]])
         cols = ["raceId", "id", "date", "year", "round", "name", "rating"]
         if view == "drivers":
-            # The team the driver raced for in each race, and its rating then.
-            frame = frame.assign(team=frame["constructorId"], team_rating=frame["EloRating"])
-            cols += ["team", "team_rating"]
+            # The team the driver raced for in each race, its rating then, and
+            # the grid's median team rating in that race.
+            frame = frame.assign(team=frame["constructorId"], team_rating=frame["EloRating"],
+                                 grid_median=frame["raceId"].map(grid_median))
+            cols += ["team", "team_rating", "grid_median"]
         frame = frame.rename(columns={cfg["id"]: "id", cfg["rating"]: "rating"})[cols]
         frame["pos"] = frame["raceId"].map(races["pos"])
         names = pd.read_csv(cfg["names"]).rename(columns={cfg["id"]: "id"})
@@ -85,8 +96,8 @@ def load(mtimes: tuple):
 # are shown by default; the team ones (drivers view only) start hidden.
 BASE_COLUMNS = ["Start", "End", "Change", "Peak", "Peak at", "Races"]
 TEAM_COLUMNS = ["Current team", "Current team: peak", "Current team: end",
-                "Current team: change", "Peak team", "Peak team: peak",
-                "Peak team: end", "Peak team: change"]
+                "Current team: change", "Peak team", "Peak team rating",
+                "Peak team vs grid"]
 TEAM_HELP = {
     "Current team": "The team in the driver's last race of the period.",
     "Current team: peak": "That team's highest rating during the driver's current "
@@ -95,11 +106,11 @@ TEAM_HELP = {
     "Current team: change": "How much that team's rating moved during the driver's "
                             "current stint (within the period).",
     "Peak team": "The team the driver was racing for when they reached their peak.",
-    "Peak team: peak": "That team's highest rating during the stint in which the "
-                       "driver peaked (within the period).",
-    "Peak team: end": "That team's rating at the end of that stint (or of the period).",
-    "Peak team: change": "How much that team's rating moved during that stint "
-                         "(within the period).",
+    "Peak team rating": "That team's rating at the moment the driver peaked "
+                        "(after the same race).",
+    "Peak team vs grid": "How far that team's rating was above (+) or below (-) the "
+                         "grid's median team in the same race, each team counted "
+                         "once. Positive = a better car than the typical one.",
 }
 
 
@@ -123,13 +134,16 @@ def summary(view: pd.DataFrame, labels: dict, column: str,
             g = g.sort_values("pos")
             stint = (g["team"] != g["team"].shift()).cumsum()
             current = g[stint == stint.iloc[-1]]
-            at_peak = g[stint == stint.loc[peak.name]]
-            for prefix, s in (("Current team", current), ("Peak team", at_peak)):
-                top, last, change = _stint_figures(s)
-                row[prefix] = team_names.get(s["team"].iloc[0], s["team"].iloc[0])
-                row[f"{prefix}: peak"] = top
-                row[f"{prefix}: end"] = last
-                row[f"{prefix}: change"] = change
+            top, last, change = _stint_figures(current)
+            row["Current team"] = team_names.get(current["team"].iloc[0],
+                                                 current["team"].iloc[0])
+            row["Current team: peak"] = top
+            row["Current team: end"] = last
+            row["Current team: change"] = change
+            # The team at the driver's peak race, and its rating after that race.
+            row["Peak team"] = team_names.get(peak["team"], peak["team"])
+            row["Peak team rating"] = round(peak["team_rating"])
+            row["Peak team vs grid"] = round(peak["team_rating"] - peak["grid_median"])
         rows.append(row)
     return pd.DataFrame(rows).sort_values("End", ascending=False)
 
@@ -378,6 +392,8 @@ st.caption(f"Showing {shown} {cfg['many']}" + (f" ({'; '.join(notes)})" if notes
 
 optional = BASE_COLUMNS + (TEAM_COLUMNS if v == "drivers" else [])
 state.setdefault(f"{v}:columns", list(BASE_COLUMNS))
+# Drop column names that no longer exist (a session from an older version).
+state[f"{v}:columns"] = [c for c in state[f"{v}:columns"] if c in optional]
 
 # Columns sits next to Rank by, on the left. A horizontal container sizes
 # both to their content and wraps Columns onto the next line when space
@@ -401,5 +417,8 @@ table.insert(0, "#", table[rank_by].rank(method="min", ascending=False).astype(i
 shown_cols = [c for c in optional if c in state[f"{v}:columns"]]
 config = {"#": st.column_config.NumberColumn(width="small", pinned=True)}
 config.update({c: st.column_config.Column(help=h) for c, h in TEAM_HELP.items()})
+# Above or below the grid: show the sign (+191 / -42).
+config["Peak team vs grid"] = st.column_config.NumberColumn(
+    help=TEAM_HELP["Peak team vs grid"], format="%+d")
 st.dataframe(table, hide_index=True, width="stretch",
              column_order=["#", cfg["column"], *shown_cols], column_config=config)
