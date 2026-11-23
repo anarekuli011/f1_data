@@ -61,9 +61,13 @@ def load(mtimes: tuple):
     for view, cfg in VIEWS.items():
         # One row per driver (or team) per race: teammates share the team rating,
         # and 1950s shared drives duplicate drivers.
-        frame = (res.drop_duplicates(["raceId", cfg["id"]])
-                    .rename(columns={cfg["id"]: "id", cfg["rating"]: "rating"})
-                    [["raceId", "id", "date", "year", "round", "name", "rating"]])
+        frame = res.drop_duplicates(["raceId", cfg["id"]])
+        cols = ["raceId", "id", "date", "year", "round", "name", "rating"]
+        if view == "drivers":
+            # The team the driver raced for in each race, and its rating then.
+            frame = frame.assign(team=frame["constructorId"], team_rating=frame["EloRating"])
+            cols += ["team", "team_rating"]
+        frame = frame.rename(columns={cfg["id"]: "id", cfg["rating"]: "rating"})[cols]
         frame["pos"] = frame["raceId"].map(races["pos"])
         names = pd.read_csv(cfg["names"]).rename(columns={cfg["id"]: "id"})
         if view == "drivers":
@@ -72,17 +76,61 @@ def load(mtimes: tuple):
         else:
             names = _with_years(names, frame, names["name"]).sort_values("name")
         out[view] = (frame, dict(zip(names["id"], names["label"])))
-    return out, races
+    team_names = (pd.read_csv(VIEWS["constructors"]["names"])
+                    .set_index("constructorId")["name"].to_dict())
+    return out, races, team_names
 
 
-def summary(view: pd.DataFrame, labels: dict, column: str) -> pd.DataFrame:
+# Table columns that can be shown or hidden, in display order. The base ones
+# are shown by default; the team ones (drivers view only) start hidden.
+BASE_COLUMNS = ["Start", "End", "Change", "Peak", "Peak at", "Races"]
+TEAM_COLUMNS = ["Current team", "Current team: peak", "Current team: end",
+                "Current team: change", "Peak team", "Peak team: peak",
+                "Peak team: end", "Peak team: change"]
+TEAM_HELP = {
+    "Current team": "The team in the driver's last race of the period.",
+    "Current team: peak": "That team's highest rating during the driver's current "
+                          "stint with it (within the period).",
+    "Current team: end": "That team's rating after the driver's last race of the period.",
+    "Current team: change": "How much that team's rating moved during the driver's "
+                            "current stint (within the period).",
+    "Peak team": "The team the driver was racing for when they reached their peak.",
+    "Peak team: peak": "That team's highest rating during the stint in which the "
+                       "driver peaked (within the period).",
+    "Peak team: end": "That team's rating at the end of that stint (or of the period).",
+    "Peak team: change": "How much that team's rating moved during that stint "
+                         "(within the period).",
+}
+
+
+def _stint_figures(stint: pd.DataFrame) -> tuple:
+    """Team rating peak, end and change over one stint (rows in race order)."""
+    r = stint["team_rating"]
+    return round(r.max()), round(r.iloc[-1]), round(r.iloc[-1] - r.iloc[0])
+
+
+def summary(view: pd.DataFrame, labels: dict, column: str,
+            team_names: dict | None = None) -> pd.DataFrame:
     rows = []
     for eid, g in view.groupby("id"):
         peak = g.loc[g["rating"].idxmax()]
         start, end = g["rating"].iloc[0], g["rating"].iloc[-1]
-        rows.append({column: labels[eid], "Start": round(start), "End": round(end),
-                     "Change": round(end - start), "Peak": round(peak["rating"]),
-                     "Peak at": f"{peak['name']} {peak['year']}", "Races": len(g)})
+        row = {column: labels[eid], "Start": round(start), "End": round(end),
+               "Change": round(end - start), "Peak": round(peak["rating"]),
+               "Peak at": f"{peak['name']} {peak['year']}", "Races": len(g)}
+        if "team" in g.columns:
+            # Stints: runs of consecutive races (in this period) with one team.
+            g = g.sort_values("pos")
+            stint = (g["team"] != g["team"].shift()).cumsum()
+            current = g[stint == stint.iloc[-1]]
+            at_peak = g[stint == stint.loc[peak.name]]
+            for prefix, s in (("Current team", current), ("Peak team", at_peak)):
+                top, last, change = _stint_figures(s)
+                row[prefix] = team_names.get(s["team"].iloc[0], s["team"].iloc[0])
+                row[f"{prefix}: peak"] = top
+                row[f"{prefix}: end"] = last
+                row[f"{prefix}: change"] = change
+        rows.append(row)
     return pd.DataFrame(rows).sort_values("End", ascending=False)
 
 
@@ -92,14 +140,15 @@ if missing:
     st.error(f"Missing {', '.join(missing)}. Run `py run_elo.py` in this folder first.")
     st.stop()
 
-data, races = load(tuple(p.stat().st_mtime for p in
+data, races, team_names = load(tuple(p.stat().st_mtime for p in
                          [RESULTS, *(c["names"] for c in VIEWS.values())]))
 all_seasons = sorted(races["year"].unique(), reverse=True)
 state = st.session_state
 
 # Streamlit forgets a widget's value when the widget isn't drawn, which would wipe
 # the hidden view's selection. Re-saving the values each run keeps both views.
-for _key in [f"{v}:{k}" for v in VIEWS for k in STATE_KEYS] + ["line_style", "rank_by"]:
+for _key in ([f"{v}:{k}" for v in VIEWS for k in STATE_KEYS + ("columns",)]
+             + ["line_style", "rank_by"]):
     if _key in state:
         state[_key] = state[_key]
 
@@ -327,10 +376,27 @@ st.caption(f"Showing {shown} {cfg['many']}" + (f" ({'; '.join(notes)})" if notes
            + ". Ratings are recorded after each race. Drag across the chart to zoom, "
            "double-click to zoom back out.")
 
-rank_by = choice("Rank by", ["End", "Peak", "Change"], "rank_by",
-                 help="Orders the table and numbers each row by this column. "
-                      "Equal values share a position.")
-table = summary(view, labels, cfg["column"]).sort_values(rank_by, ascending=False)
+optional = BASE_COLUMNS + (TEAM_COLUMNS if v == "drivers" else [])
+state.setdefault(f"{v}:columns", list(BASE_COLUMNS))
+
+# Columns sits next to Rank by, on the left: the table's own toolbar appears
+# over its top-right corner on hover.
+rank_col, cols_col, _ = st.columns([2, 1, 4], vertical_alignment="bottom")
+with rank_col:
+    rank_by = choice("Rank by", ["End", "Peak", "Change"], "rank_by",
+                     help="Orders the table and numbers each row by this column. "
+                          "Equal values share a position.")
+with cols_col:
+    with st.popover("Columns", width="stretch"):
+        st.pills("Shown columns", optional, selection_mode="multi", key=f"{v}:columns",
+                 help="Pick the columns to show. The rank and name are always shown.")
+        st.button("Default columns", key=f"{v}:columns_default", width="stretch",
+                  on_click=lambda key=f"{v}:columns": state.update({key: list(BASE_COLUMNS)}))
+
+table = summary(view, labels, cfg["column"], team_names).sort_values(rank_by, ascending=False)
 table.insert(0, "#", table[rank_by].rank(method="min", ascending=False).astype(int))
+shown_cols = [c for c in optional if c in state[f"{v}:columns"]]
+config = {"#": st.column_config.NumberColumn(width="small", pinned=True)}
+config.update({c: st.column_config.Column(help=h) for c, h in TEAM_HELP.items()})
 st.dataframe(table, hide_index=True, width="stretch",
-             column_config={"#": st.column_config.NumberColumn(width="small", pinned=True)})
+             column_order=["#", cfg["column"], *shown_cols], column_config=config)
