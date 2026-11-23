@@ -12,7 +12,7 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 
-from f1elo import config, updater
+from f1elo import config, expected_score, updater
 
 RESULTS = config.OUTPUT_DIR / "results_with_elo.csv"
 PALETTE = px.colors.qualitative.Dark24 + px.colors.qualitative.Light24
@@ -105,8 +105,8 @@ def load(mtimes: tuple):
 
 # Table columns that can be shown or hidden, in display order. The base ones
 # are shown by default; the team ones (drivers view only) start hidden.
-BASE_COLUMNS = ["Start", "End", "Grid median", "End vs grid", "Change", "Peak",
-                "Peak vs grid", "Peak at", "Races"]
+BASE_COLUMNS = ["Start", "End", "Grid median", "End vs grid", "End vs grid %",
+                "Change", "Peak", "Peak vs grid", "Peak vs grid %", "Peak at", "Races"]
 BASE_HELP = {
     "Grid median": "The median rating of the grid after the race where End was "
                    "taken (the row's last race in the period), each {one} counted "
@@ -117,9 +117,28 @@ BASE_HELP = {
                     "the peak was reached (each {one} counted once): how far above "
                     "the typical {one} they stood at their best.",
 }
+# The "%" columns turn a gap to the grid median into the model's own win
+# chance: expected_score on the engine's 400 scale. For drivers the cars
+# cancel (same car), so it reads as head-to-head driver skill.
+WIN_HELP = {
+    "drivers": "The chance of beating the grid's median driver in the same car, "
+               "from the rating gap {when} (the model's own win chance: 50% = "
+               "typical, 76% = wins about 3 in 4, 90% = 9 in 10).",
+    "constructors": "The chance of beating the grid's median team, from the rating "
+                    "gap {when} (the model's own win chance: 50% = typical, 76% = "
+                    "wins about 3 in 4, 90% = 9 in 10).",
+}
+WIN_WHEN = {"End vs grid %": "at the end", "Peak vs grid %": "at the peak"}
+
+
+def win_chance(gap: float) -> int:
+    """Chance, in whole percent, of beating someone rated `gap` points lower."""
+    return round(100 * expected_score(gap, 0.0, config.DEFAULT_CONFIG.elo_scale))
+
+
 TEAM_COLUMNS = ["Current team", "Current team: peak", "Current team: end",
                 "Current team: change", "Peak team", "Peak team rating",
-                "Peak team vs grid"]
+                "Peak team vs grid", "Peak team vs grid %"]
 TEAM_HELP = {
     "Current team": "The team in the driver's last race of the period.",
     "Current team: peak": "That team's highest rating during the driver's current "
@@ -133,6 +152,9 @@ TEAM_HELP = {
     "Peak team vs grid": "How far that team's rating was above (+) or below (-) the "
                          "grid's median team in the same race, each team counted "
                          "once. Positive = a better car than the typical one.",
+    "Peak team vs grid %": "The chance of that car beating the grid's median car "
+                           "at the driver's peak, from the rating gap (the model's "
+                           "own win chance: 50% = typical, 90% = 9 in 10).",
 }
 
 
@@ -149,10 +171,12 @@ def summary(view: pd.DataFrame, labels: dict, column: str,
         peak = g.loc[g["rating"].idxmax()]
         start, end = g["rating"].iloc[0], g["rating"].iloc[-1]
         grid = g["grid_median"].iloc[-1]  # the grid when End was taken
+        peak_gap = peak["rating"] - peak["grid_median"]
         row = {column: labels[eid], "Start": round(start), "End": round(end),
                "Grid median": round(grid), "End vs grid": round(end - grid),
+               "End vs grid %": win_chance(end - grid),
                "Change": round(end - start), "Peak": round(peak["rating"]),
-               "Peak vs grid": round(peak["rating"] - peak["grid_median"]),
+               "Peak vs grid": round(peak_gap), "Peak vs grid %": win_chance(peak_gap),
                "Peak at": f"{peak['name']} {peak['year']}", "Races": len(g)}
         if "team" in g.columns:
             # Stints: runs of consecutive races (in this period) with one team.
@@ -168,7 +192,9 @@ def summary(view: pd.DataFrame, labels: dict, column: str,
             # The team at the driver's peak race, and its rating after that race.
             row["Peak team"] = team_names.get(peak["team"], peak["team"])
             row["Peak team rating"] = round(peak["team_rating"])
-            row["Peak team vs grid"] = round(peak["team_rating"] - peak["team_grid_median"])
+            team_gap = peak["team_rating"] - peak["team_grid_median"]
+            row["Peak team vs grid"] = round(team_gap)
+            row["Peak team vs grid %"] = win_chance(team_gap)
         rows.append(row)
     return pd.DataFrame(rows).sort_values("End", ascending=False)
 
@@ -478,16 +504,21 @@ with st.container(horizontal=True, vertical_alignment="bottom", gap="medium"):
 st.space("small")
 
 shown_cols = [c for c in optional if c in state[f"{v}:columns"]]
-config = {"#": st.column_config.NumberColumn(width="small", pinned=True)}
-config.update({c: st.column_config.Column(help=h) for c, h in TEAM_HELP.items()})
-config["Grid median"] = st.column_config.NumberColumn(
+col_config = {"#": st.column_config.NumberColumn(width="small", pinned=True)}
+col_config.update({c: st.column_config.Column(help=h) for c, h in TEAM_HELP.items()})
+col_config["Grid median"] = st.column_config.NumberColumn(
     help=BASE_HELP["Grid median"].format(one=cfg["one"]))
 # Above or below the grid: show the sign (+191 / -42).
-config["End vs grid"] = st.column_config.NumberColumn(
-    help=BASE_HELP["End vs grid"].format(one=cfg["one"]), format="%+d")
-config["Peak vs grid"] = st.column_config.NumberColumn(
-    help=BASE_HELP["Peak vs grid"].format(one=cfg["one"]), format="%+d")
-config["Peak team vs grid"] = st.column_config.NumberColumn(
+for c in ("End vs grid", "Peak vs grid"):
+    col_config[c] = st.column_config.NumberColumn(
+        help=BASE_HELP[c].format(one=cfg["one"]), format="%+d")
+col_config["Peak team vs grid"] = st.column_config.NumberColumn(
     help=TEAM_HELP["Peak team vs grid"], format="%+d")
+# Win chances, stored as whole percentages (0-100).
+for c, when in WIN_WHEN.items():
+    col_config[c] = st.column_config.NumberColumn(
+        help=WIN_HELP[v].format(when=when), format="%d%%")
+col_config["Peak team vs grid %"] = st.column_config.NumberColumn(
+    help=TEAM_HELP["Peak team vs grid %"], format="%d%%")
 st.dataframe(table, hide_index=True, width="stretch",
-             column_order=["#", cfg["column"], *shown_cols], column_config=config)
+             column_order=["#", cfg["column"], *shown_cols], column_config=col_config)
