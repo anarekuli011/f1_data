@@ -14,6 +14,7 @@ f1_elo_app/
 │   ├── data_loader.py      # load + merge the raw CSVs
 │   ├── elo_engine.py       # the core pairwise ELO algorithm  <-- the heart
 │   ├── analysis.py         # leaderboards, histories, percentiles
+│   ├── strength.py         # pre-race strengths D + w*C, for race predictions
 │   └── predictions.py      # finishing-position probabilities
 ├── run_elo.py              # CLI: load -> compute -> save -> print summaries
 ├── make_sample_data.py     # generates fake CSVs so you can test immediately
@@ -110,6 +111,34 @@ one teammate's worth. Each driver's race is averaged over the weight of
 comparisons they had, so it still moves them as far as anyone's race.
 Two-car teams are unaffected. All K-factors and the car
 weight live in `config.py`.
+
+## Pre-race strengths (for race predictions)
+
+`f1elo/strength.py` gives every car one number before a race,
+`strength = D + w*C` (driver rating plus weighted car rating, as they stood
+before that race), and P(A finishes ahead of B) =
+`expected_score(S_a, S_b, s)`:
+
+```python
+from f1elo.strength import pre_race_strengths, next_race_strengths, add_names
+
+past = pre_race_strengths(1170)      # one past race (or a list, or None = all)
+nxt = add_names(next_race_strengths())  # the next race, latest race's field
+```
+
+`w` and `s` are `prediction_car_weight` (1.875) and `prediction_scale`
+(1175), tuned on every pair of cars in 1990-2022 races with
+`backtest_strength.py`. They differ from the engine's 0.875 / 400 (tuned for
+the rating updates, on teammates) mainly because 43% of whole-field pairs
+are decided by a retirement: those are hard to predict (a flatter scale)
+and mostly down to the car (a larger car weight). On pairs where both cars
+finished, the best is 1.25 / 525.
+
+```bash
+py backtest_strength.py                       # wide grid, candidates, variance shares
+py backtest_strength.py --pairs classified    # only pairs where both finished
+py backtest_strength.py --stage post_quali    # ratings after qualifying
+```
 
 ## Notes vs. the original notebook
 

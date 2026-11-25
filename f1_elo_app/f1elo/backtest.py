@@ -505,3 +505,150 @@ def sweep_drivers(prepared: list[tuple], grid: dict[str, list],
                              if len(values[k]) > 1)
             print(f"  {n}/{len(combos)}  {desc}", flush=True)
     return pd.DataFrame(rows)
+
+
+# ---------------------------------------------------------------------------
+# Strength backtest (whole field)
+# ---------------------------------------------------------------------------
+# The race predictions use one strength per car, S = D + w * C (see
+# f1elo/strength.py). This scores them on EVERY pair of different drivers in
+# a race -- teammates and cross-team pairs alike -- with the engine's outcome
+# rules: a classified car beats every car classified below it and every
+# DNF; DNF-vs-DNF pairs are skipped. The engine's ratings don't depend on w
+# or the prediction scale, so the replay runs once and every candidate is
+# scored from the same pair differences, vectorised.
+
+def strength_pairs(prepared: list[tuple], cfg: EloConfig = DEFAULT_CONFIG,
+                   stage: str = "pre", start_year: int = 0):
+    """Replay the engine once; collect every scored pair and per-race spreads.
+
+    Returns ``(pairs, spread)``:
+      * ``pairs``: dict of numpy arrays, one value per scored pair, oriented
+        winner minus loser -- ``year``, ``dD`` (driver rating gap), ``dC``
+        (car rating gap), ``mate`` (same constructor), ``dnf`` (the loser
+        did not finish).
+      * ``spread``: DataFrame, one row per race, with the within-race sums
+        of squares ``s_dd``, ``s_cc`` and cross products ``s_dc`` of D and
+        C about the race's mean (for the car-vs-driver variance shares).
+    Only races from ``start_year`` on are collected (all are replayed).
+    """
+    import numpy as np
+
+    from .strength import replay  # late import: strength imports this module
+
+    frame, _ = replay(prepared, cfg, stage=stage,
+                      race_ids=[r[0] for r in prepared if r[1] >= start_year])
+    dnf = cfg.dnf_sentinel
+    cols = {k: [] for k in ("year", "dD", "dC", "mate", "dnf")}
+    spread = []
+    for (race_id, year), race in frame.groupby(["raceId", "year"], sort=False):
+        d = race["driver_elo"].to_numpy(float)
+        c = race["constructor_elo"].to_numpy(float)
+        drivers = race["driverId"].to_numpy()
+        teams = race["constructorId"].to_numpy()
+        out = (race["position"] == dnf).to_numpy()
+        # Rows are in finishing order, DNFs last: i < j means i beat j,
+        # unless both are DNFs.
+        i, j = np.triu_indices(len(race), k=1)
+        keep = ~(out[i] & out[j]) & (drivers[i] != drivers[j])
+        i, j = i[keep], j[keep]
+        cols["year"].append(np.full(len(i), year))
+        cols["dD"].append(d[i] - d[j])
+        cols["dC"].append(c[i] - c[j])
+        cols["mate"].append(teams[i] == teams[j])
+        cols["dnf"].append(out[j])   # the loser retired (the winner can't have)
+        dd, cc = d - d.mean(), c - c.mean()
+        spread.append({"raceId": race_id, "year": year, "cars": len(race),
+                       "s_dd": float(dd @ dd), "s_cc": float(cc @ cc),
+                       "s_dc": float(dd @ cc)})
+    pairs = {k: np.concatenate(v) if v else np.array([]) for k, v in cols.items()}
+    return pairs, pd.DataFrame(spread)
+
+
+def period_mask(years, period):
+    """Boolean mask of the values in ``years`` that fall in a period."""
+    import numpy as np
+
+    if isinstance(period, (set, frozenset)):
+        return np.isin(years, list(period))
+    return (years >= period[0]) & (years <= period[1])
+
+
+def score_strength(dD, dC, driver_weight: float, car_weight: float,
+                   scale: float) -> dict:
+    """Mean log loss, Brier score and accuracy of S = a*D + w*C on pairs
+    oriented winner minus loser (so p is the probability of what happened)."""
+    import numpy as np
+
+    n = len(dD)
+    if n == 0:
+        return {"pairs": 0, "logloss": float("nan"), "brier": float("nan"),
+                "acc": float("nan")}
+    x = (driver_weight * dD + car_weight * dC) / scale
+    # p = 1 / (1 + 10^-x);  -ln p = ln(1 + 10^-x), computed stably.
+    z = -x * math.log(10.0)
+    logloss = np.logaddexp(0.0, z)
+    p = np.exp(-logloss)
+    return {"pairs": int(n), "logloss": float(logloss.mean()),
+            "brier": float(((1.0 - p) ** 2).mean()),
+            "acc": float(((x > 0) + 0.5 * (x == 0)).mean())}
+
+
+def fit_strength(dD, dC, iters: int = 50) -> tuple[float, float]:
+    """Maximum-likelihood (car_weight, scale) for S = D + w*C.
+
+    A logistic regression of 'winner beat loser' on the two gaps, with no
+    intercept (the pair could be written either way round): P = 1 / (1 +
+    exp(-(b1*dD + b2*dC))), solved by Newton's method. Then w = b2 / b1 and
+    scale = ln(10) / b1.
+    """
+    import numpy as np
+
+    X = np.column_stack([dD, dC]) / 400.0
+    b = np.zeros(2)
+    for _ in range(iters):
+        p = 1.0 / (1.0 + np.exp(-(X @ b)))
+        grad = X.T @ (1.0 - p)
+        hess = (X * (p * (1.0 - p))[:, None]).T @ X
+        step = np.linalg.solve(hess, grad)
+        b += step
+        if np.abs(step).max() < 1e-10:
+            break
+    b1, b2 = b / 400.0
+    return float(b2 / b1), float(math.log(10.0) / b1)
+
+
+def variance_shares(spread: pd.DataFrame, period, car_weight: float) -> dict:
+    """Within-race variance of the strength, split into driver and car.
+
+    Var(S) = Var(D) + w^2 Var(C) + 2w Cov(D, C), pooled over the races in
+    the period about each race's own mean. ``car_share`` = w^2 Var(C) /
+    (Var(D) + w^2 Var(C)), the share with the covariance left out (the
+    comparable number to a variance decomposition with independent driver
+    and team effects); ``cov_share`` is 2w Cov / Var(S).
+    """
+    r = select_period(spread, period)
+    if r.empty:
+        return {}
+    vd, vc, cv = r["s_dd"].sum(), r["s_cc"].sum() * car_weight ** 2, \
+        r["s_dc"].sum() * car_weight
+    total = vd + vc + 2 * cv
+    return {"car_share": vc / (vd + vc), "driver_share": vd / (vd + vc),
+            "cov_share": 2 * cv / total if total else float("nan"),
+            "corr_dc": cv / math.sqrt(vd * vc) if vd > 0 and vc > 0 else float("nan")}
+
+
+def fit_scale(gap, iters: int = 50) -> float:
+    """Maximum-likelihood scale s for P = 1 / (1 + 10^(-gap / s)), with
+    ``gap`` the winner-minus-loser strength gap of each pair."""
+    import numpy as np
+
+    x = np.asarray(gap, float) / 400.0
+    b = 0.0
+    for _ in range(iters):
+        p = 1.0 / (1.0 + np.exp(-b * x))
+        step = float((x * (1.0 - p)).sum() / (x * x * p * (1.0 - p)).sum())
+        b += step
+        if abs(step) < 1e-12:
+            break
+    return 400.0 * math.log(10.0) / b
