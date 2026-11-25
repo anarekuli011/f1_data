@@ -12,7 +12,7 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 
-from f1elo import config, updater
+from f1elo import config, expected_score, updater
 
 RESULTS = config.OUTPUT_DIR / "results_with_elo.csv"
 PALETTE = px.colors.qualitative.Dark24 + px.colors.qualitative.Light24
@@ -103,20 +103,105 @@ def load(mtimes: tuple):
     return out, races, team_names, latest_medians
 
 
-# Table columns that can be shown or hidden, in display order. The base ones
-# are shown by default; the team ones (drivers view only) start hidden.
-BASE_COLUMNS = ["Start", "End", "Grid median", "End vs grid", "Change", "Peak",
-                "Peak at", "Races"]
-BASE_HELP = {
-    "Grid median": "The median rating of the grid after the race where End was "
-                   "taken (the row's last race in the period), each {one} counted "
-                   "once.",
-    "End vs grid": "End minus Grid median: how far above (+) or below (-) the "
-                   "typical {one} on the grid at that moment.",
+# Table columns that can be shown or hidden, in display order. Only
+# DEFAULT_COLUMNS start shown (and come back with "Default columns"); the
+# grid comparisons and the team ones (drivers view only) start hidden.
+BASE_COLUMNS = ["Start", "End", "Grid median at end", "End vs grid", "End vs grid %",
+                "End pos score", "Change", "Peak", "Grid median at peak", "Peak vs grid",
+                "Peak vs grid %", "Peak pos score", "Peak at",
+                "Best season", "Best season avg", "Grid median (best season)",
+                "Best season vs grid", "Best season vs grid %", "Season pos score",
+                "Races"]
+
+# Positional scores: the average of a row's positions (1 = highest) by a
+# rating and its gap to the grid median, within the list as shown (after the
+# filters), so they change with the list's boundary. Lower = better. The
+# rating (first) is also what the top-N cut uses when ranking by the score.
+# The grid median itself is left out: the gap already measures the rating
+# against it, and adding it would reward the opposite (a high median at the
+# same rating means a smaller gap), mostly reflecting who was on a run then.
+POS_SCORES = {
+    "End pos score": ("End", "End vs grid"),
+    "Peak pos score": ("Peak", "Peak vs grid"),
+    "Peak team pos score": ("Peak team rating", "Peak team vs grid"),
+    "Season pos score": ("Best season avg", "Best season vs grid"),
 }
+POS_HELP = ("The average of this row's positions in the list shown (1 = highest) "
+            "by {a} and {b}: how high the rating was, and how far above the "
+            "typical one on the grid at the time. Lower = better; 1.0 = first in "
+            "both. It's relative to the list, so it changes with the filters.")
+RANK_OPTIONS = ["End", "Peak", "Change"]
+DEFAULT_COLUMNS = ["Start", "End", "Change", "Peak", "Peak at", "Races"]
+BASE_HELP = {
+    "Grid median at end": "The median rating of the grid after the race where End "
+                          "was taken (the row's last race in the period), each "
+                          "{one} counted once.",
+    "End vs grid": "End minus Grid median at end: how far above (+) or below (-) "
+                   "the typical {one} on the grid at that moment.",
+    "Grid median at peak": "The median rating of the grid after the race where the "
+                           "peak was reached, each {one} counted once.",
+    "Peak vs grid": "Peak minus Grid median at peak: how far above the typical "
+                    "{one} they stood at their best.",
+    "Best season": "The season with the highest average rating (within the "
+                   "period). A season only counts if the {one} took part in at "
+                   "least half of its races; blank if none qualifies.",
+    "Best season avg": "The average rating after each race of the best season: "
+                       "how high they stayed for a whole season, not just one race.",
+    "Grid median (best season)": "The grid median averaged over the same races "
+                                 "(each {one} counted once per race).",
+    "Best season vs grid": "Best season avg minus Grid median (best season): how "
+                           "far above the typical {one} they stood across that "
+                           "season.",
+}
+# A season counts for "best season" only with at least this share of its
+# races (within the period), so a one-off drive can't be someone's best.
+MIN_SEASON_SHARE = 0.5
+# The "%" columns turn a gap to the grid median into the model's own win
+# chance: expected_score on the engine's 400 scale. For drivers the cars
+# cancel (same car), so it reads as head-to-head driver skill.
+WIN_HELP = {
+    "drivers": "The chance of beating the grid's median driver in the same car, "
+               "from the rating gap {when} (the model's own win chance: 50% = "
+               "typical, 76% = wins about 3 in 4, 90% = 9 in 10).",
+    "constructors": "The chance of beating the grid's median team, from the rating "
+                    "gap {when} (the model's own win chance: 50% = typical, 76% = "
+                    "wins about 3 in 4, 90% = 9 in 10).",
+}
+WIN_WHEN = {"End vs grid %": "at the end", "Peak vs grid %": "at the peak",
+            "Best season vs grid %": "averaged over the best season"}
+
+
+def win_chance(gap: float) -> int | None:
+    """Chance, in whole percent, of beating someone rated `gap` points lower
+    (None when there is no gap, e.g. no qualifying best season)."""
+    if pd.isna(gap):
+        return None
+    return round(100 * expected_score(gap, 0.0, config.DEFAULT_CONFIG.elo_scale))
+
+
+def best_season(g: pd.DataFrame, season_races: dict) -> dict:
+    """The season with the highest average rating among those where this
+    driver (or team) did at least MIN_SEASON_SHARE of the races; blank values
+    when none qualifies."""
+    by = g.groupby("year").agg(n=("rating", "size"), avg=("rating", "mean"),
+                               grid=("grid_median", "mean"))
+    by = by[by["n"] >= MIN_SEASON_SHARE * by.index.map(season_races)]
+    if by.empty:
+        return {"Best season": None, "Best season avg": None,
+                "Grid median (best season)": None, "Best season vs grid": None,
+                "Best season vs grid %": None}
+    year = by["avg"].idxmax()
+    avg, grid = by.loc[year, "avg"], by.loc[year, "grid"]
+    return {"Best season": str(year), "Best season avg": round(avg),
+            "Grid median (best season)": round(grid),
+            "Best season vs grid": round(avg - grid),
+            "Best season vs grid %": win_chance(avg - grid)}
+
+
 TEAM_COLUMNS = ["Current team", "Current team: peak", "Current team: end",
                 "Current team: change", "Peak team", "Peak team rating",
-                "Peak team vs grid"]
+                "Team grid median at peak", "Peak team vs grid", "Peak team vs grid %",
+                "Peak team pos score"]
 TEAM_HELP = {
     "Current team": "The team in the driver's last race of the period.",
     "Current team: peak": "That team's highest rating during the driver's current "
@@ -127,9 +212,14 @@ TEAM_HELP = {
     "Peak team": "The team the driver was racing for when they reached their peak.",
     "Peak team rating": "That team's rating at the moment the driver peaked "
                         "(after the same race).",
-    "Peak team vs grid": "How far that team's rating was above (+) or below (-) the "
-                         "grid's median team in the same race, each team counted "
-                         "once. Positive = a better car than the typical one.",
+    "Team grid median at peak": "The median team rating of the grid after the race "
+                                "where the driver peaked, each team counted once.",
+    "Peak team vs grid": "Peak team rating minus Team grid median at peak: how far "
+                         "above (+) or below (-) the typical team that car was. "
+                         "Positive = a better car than the typical one.",
+    "Peak team vs grid %": "The chance of that car beating the grid's median car "
+                           "at the driver's peak, from the rating gap (the model's "
+                           "own win chance: 50% = typical, 90% = 9 in 10).",
 }
 
 
@@ -140,16 +230,25 @@ def _stint_figures(stint: pd.DataFrame) -> tuple:
 
 
 def summary(view: pd.DataFrame, labels: dict, column: str,
-            team_names: dict | None = None) -> pd.DataFrame:
+            team_names: dict | None = None,
+            season_races: dict | None = None) -> pd.DataFrame:
+    """One row per driver (or team). season_races: races per season within
+    the period, for the best-season rule."""
     rows = []
     for eid, g in view.groupby("id"):
         peak = g.loc[g["rating"].idxmax()]
         start, end = g["rating"].iloc[0], g["rating"].iloc[-1]
         grid = g["grid_median"].iloc[-1]  # the grid when End was taken
+        peak_gap = peak["rating"] - peak["grid_median"]
         row = {column: labels[eid], "Start": round(start), "End": round(end),
-               "Grid median": round(grid), "End vs grid": round(end - grid),
+               "Grid median at end": round(grid), "End vs grid": round(end - grid),
+               "End vs grid %": win_chance(end - grid),
                "Change": round(end - start), "Peak": round(peak["rating"]),
+               "Grid median at peak": round(peak["grid_median"]),
+               "Peak vs grid": round(peak_gap), "Peak vs grid %": win_chance(peak_gap),
                "Peak at": f"{peak['name']} {peak['year']}", "Races": len(g)}
+        if season_races is not None:
+            row.update(best_season(g, season_races))
         if "team" in g.columns:
             # Stints: runs of consecutive races (in this period) with one team.
             g = g.sort_values("pos")
@@ -164,7 +263,10 @@ def summary(view: pd.DataFrame, labels: dict, column: str,
             # The team at the driver's peak race, and its rating after that race.
             row["Peak team"] = team_names.get(peak["team"], peak["team"])
             row["Peak team rating"] = round(peak["team_rating"])
-            row["Peak team vs grid"] = round(peak["team_rating"] - peak["team_grid_median"])
+            team_gap = peak["team_rating"] - peak["team_grid_median"]
+            row["Team grid median at peak"] = round(peak["team_grid_median"])
+            row["Peak team vs grid"] = round(team_gap)
+            row["Peak team vs grid %"] = win_chance(team_gap)
         rows.append(row)
     return pd.DataFrame(rows).sort_values("End", ascending=False)
 
@@ -316,8 +418,10 @@ with st.sidebar:
                     key=f"{v}:min_races", disabled=not state[f"{v}:min_on"])
     st.toggle("Top positions only", key=f"{v}:top_on",
               help="Keep only the top positions by the 'Rank by' choice above the "
-                   "table (End, Peak or Change). Equal values share a position, so "
-                   "a tie at the cut-off can show a few more.")
+                   "table (End, Peak or Change). Ranking by a positional score cuts "
+                   "by its rating (Peak pos score: the top N by Peak), then orders "
+                   "that list by the score. Equal values share a position, so a "
+                   "tie at the cut-off can show a few more.")
     st.number_input("Show the top", min_value=1, step=1, key=f"{v}:top_n",
                     disabled=not state[f"{v}:top_on"])
 
@@ -373,18 +477,42 @@ if view.empty:
     st.stop()
 view["label"] = view["id"].map(labels)
 
+# Columns this view offers, and the ones picked (drawn below the chart).
+optional = BASE_COLUMNS + (TEAM_COLUMNS if v == "drivers" else [])
+state.setdefault(f"{v}:columns", list(DEFAULT_COLUMNS))
+# Drop column names that no longer exist (a session from an older version).
+state[f"{v}:columns"] = [c for c in state[f"{v}:columns"] if c in optional]
+
+# Rank by offers a positional score only while its column is shown; if the
+# chosen one was hidden, fall back to End.
+rank_options = RANK_OPTIONS + [c for c in POS_SCORES if c in state[f"{v}:columns"]]
+state.setdefault("rank_by", "End")
+if state["rank_by"] not in rank_options:
+    state["rank_by"] = state["_rank_by"] = "End"
+rank_by = state["rank_by"]
+
 # The table, ranked and filtered (the Rank by control is drawn under the
 # chart, but its value is known now). The chart shows the same rows.
-state.setdefault("rank_by", "End")
-rank_by = state["rank_by"]
-table = summary(view, labels, cfg["column"], team_names)
+season_races = shown_races.groupby("year").size().to_dict()  # within the period
+table = summary(view, labels, cfg["column"], team_names, season_races)
 in_period = len(table)
 if state[f"{v}:min_on"]:
     table = table[table["Races"] >= state[f"{v}:min_races"]]
-table = table.sort_values(rank_by, ascending=False)
-table.insert(0, "#", table[rank_by].rank(method="min", ascending=False).astype(int))
 if state[f"{v}:top_on"]:
-    table = table[table["#"] <= state[f"{v}:top_n"]]
+    # The list's boundary: the top N by a rating. Ranking by a positional
+    # score cuts by its rating (Peak pos score -> Peak), then reorders.
+    # Rows with no value to cut by (no qualifying best season) drop out.
+    cut_by = POS_SCORES[rank_by][0] if rank_by in POS_SCORES else rank_by
+    table = table[table[cut_by].rank(method="min", ascending=False) <= state[f"{v}:top_n"]]
+# Positional scores, relative to the list as it now stands.
+for score, cols in POS_SCORES.items():
+    if all(c in table.columns for c in cols):
+        table[score] = sum(table[c].rank(method="min", ascending=False)
+                           for c in cols) / len(cols)
+low_first = rank_by in POS_SCORES  # a lower score is better
+table = table.sort_values(rank_by, ascending=low_first)  # blanks go last
+table.insert(0, "#", table[rank_by].rank(method="min", ascending=low_first,
+                                         na_option="bottom").astype(int))
 filtered_out = in_period - len(table)
 if table.empty:
     st.warning(f"The filters leave no {cfg['many']} to show. Lower the minimum "
@@ -451,37 +579,52 @@ st.caption(f"Showing {shown} {cfg['many']}" + (f" ({'; '.join(notes)})" if notes
            + ". Ratings are recorded after each race. Drag across the chart to zoom, "
            "double-click to zoom back out.")
 
-optional = BASE_COLUMNS + (TEAM_COLUMNS if v == "drivers" else [])
-state.setdefault(f"{v}:columns", list(BASE_COLUMNS))
-# Drop column names that no longer exist (a session from an older version).
-state[f"{v}:columns"] = [c for c in state[f"{v}:columns"] if c in optional]
-
 # Columns sits next to Rank by, on the left. A horizontal container sizes
 # both to their content and wraps Columns onto the next line when space
 # runs out, so they never overlap (fixed-ratio columns squeezed it on
 # narrow pages).
 with st.container(horizontal=True, vertical_alignment="bottom", gap="medium"):
-    rank_by = choice("Rank by", ["End", "Peak", "Change"], "rank_by",
+    rank_by = choice("Rank by", rank_options, "rank_by",
                      help="Orders the table and numbers each row by this column. "
-                          "Equal values share a position.")
+                          "Equal values share a position. A positional score "
+                          "appears here while its column is shown; it ranks "
+                          "lowest first.")
     with st.popover("Columns", width="content"):
         st.pills("Shown columns", optional, selection_mode="multi", key=f"{v}:columns",
                  help="Pick the columns to show. The rank and name are always shown.")
         st.button("Default columns", key=f"{v}:columns_default", width="stretch",
-                  on_click=lambda key=f"{v}:columns": state.update({key: list(BASE_COLUMNS)}))
+                  on_click=lambda key=f"{v}:columns": state.update({key: list(DEFAULT_COLUMNS)}))
 # The table's hover toolbar floats just above its top edge; keep it clear of
 # the controls when they span the full width (phones).
 st.space("small")
 
 shown_cols = [c for c in optional if c in state[f"{v}:columns"]]
-config = {"#": st.column_config.NumberColumn(width="small", pinned=True)}
-config.update({c: st.column_config.Column(help=h) for c, h in TEAM_HELP.items()})
-config["Grid median"] = st.column_config.NumberColumn(
-    help=BASE_HELP["Grid median"].format(one=cfg["one"]))
+col_config = {"#": st.column_config.NumberColumn(width="small", pinned=True)}
+col_config.update({c: st.column_config.Column(help=h) for c, h in TEAM_HELP.items()})
+for c in ("Grid median at end", "Grid median at peak"):
+    col_config[c] = st.column_config.NumberColumn(help=BASE_HELP[c].format(one=cfg["one"]))
 # Above or below the grid: show the sign (+191 / -42).
-config["End vs grid"] = st.column_config.NumberColumn(
-    help=BASE_HELP["End vs grid"].format(one=cfg["one"]), format="%+d")
-config["Peak team vs grid"] = st.column_config.NumberColumn(
+for c in ("End vs grid", "Peak vs grid"):
+    col_config[c] = st.column_config.NumberColumn(
+        help=BASE_HELP[c].format(one=cfg["one"]), format="%+d")
+col_config["Peak team vs grid"] = st.column_config.NumberColumn(
     help=TEAM_HELP["Peak team vs grid"], format="%+d")
+# Best season: can be blank, so give whole-number formats explicitly.
+col_config["Best season"] = st.column_config.TextColumn(
+    help=BASE_HELP["Best season"].format(one=cfg["one"]))
+for c in ("Best season avg", "Grid median (best season)"):
+    col_config[c] = st.column_config.NumberColumn(
+        help=BASE_HELP[c].format(one=cfg["one"]), format="%d")
+col_config["Best season vs grid"] = st.column_config.NumberColumn(
+    help=BASE_HELP["Best season vs grid"].format(one=cfg["one"]), format="%+d")
+# Win chances, stored as whole percentages (0-100).
+for c, when in WIN_WHEN.items():
+    col_config[c] = st.column_config.NumberColumn(
+        help=WIN_HELP[v].format(when=when), format="%d%%")
+col_config["Peak team vs grid %"] = st.column_config.NumberColumn(
+    help=TEAM_HELP["Peak team vs grid %"], format="%d%%")
+for c, (a, b) in POS_SCORES.items():
+    col_config[c] = st.column_config.NumberColumn(
+        help=POS_HELP.format(a=a, b=b), format="%.2f")
 st.dataframe(table, hide_index=True, width="stretch",
-             column_order=["#", cfg["column"], *shown_cols], column_config=config)
+             column_order=["#", cfg["column"], *shown_cols], column_config=col_config)
