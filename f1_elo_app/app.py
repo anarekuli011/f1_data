@@ -111,7 +111,8 @@ BASE_COLUMNS = ["Start", "End", "Grid median at end", "End vs grid", "End vs gri
                 "Peak vs grid %", "Peak pos score", "Peak at",
                 "Best season", "Best season avg", "Grid median (best season)",
                 "Best season vs grid", "Best season vs grid %", "Season pos score",
-                "Races"]
+                "Period avg", "Grid median (period)", "Period vs grid",
+                "Period vs grid %", "Period pos score", "Races"]
 
 # Positional scores: the average of a row's positions (1 = highest) by a
 # rating and its gap to the grid median, within the list as shown (after the
@@ -125,6 +126,7 @@ POS_SCORES = {
     "Peak pos score": ("Peak", "Peak vs grid"),
     "Peak team pos score": ("Peak team rating", "Peak team vs grid"),
     "Season pos score": ("Best season avg", "Best season vs grid"),
+    "Period pos score": ("Period avg", "Period vs grid"),
 }
 POS_HELP = ("The average of this row's positions in the list shown (1 = highest) "
             "by {a} and {b}: how high the rating was, and how far above the "
@@ -152,6 +154,17 @@ BASE_HELP = {
     "Best season vs grid": "Best season avg minus Grid median (best season): how "
                            "far above the typical {one} they stood across that "
                            "season.",
+    "Period avg": "The average rating after each of their races in the whole period "
+                  "shown (every season, not just the best). With no seasons picked "
+                  "and the period left at its default, that's the whole career. "
+                  "Few races make it noisy: use Minimum races.",
+    "Grid median (period)": "The grid median averaged over the same races (each "
+                            "{one} counted once per race), so each race counts as "
+                            "much as in Period avg.",
+    "Period vs grid": "Period avg minus Grid median (period): how far above the "
+                      "typical {one} they stood on average across the period. "
+                      "Fairer than Period avg across eras, because the grid level "
+                      "changes over time.",
 }
 # A season counts for "best season" only with at least this share of its
 # races (within the period), so a one-off drive can't be someone's best.
@@ -168,7 +181,8 @@ WIN_HELP = {
                     "wins about 3 in 4, 90% = 9 in 10).",
 }
 WIN_WHEN = {"End vs grid %": "at the end", "Peak vs grid %": "at the peak",
-            "Best season vs grid %": "averaged over the best season"}
+            "Best season vs grid %": "averaged over the best season",
+            "Period vs grid %": "averaged over the whole period"}
 
 
 def win_chance(gap: float) -> int | None:
@@ -247,6 +261,11 @@ def summary(view: pd.DataFrame, labels: dict, column: str,
                "Grid median at peak": round(peak["grid_median"]),
                "Peak vs grid": round(peak_gap), "Peak vs grid %": win_chance(peak_gap),
                "Peak at": f"{peak['name']} {peak['year']}", "Races": len(g)}
+        # The whole period: every race of theirs in it, each counted once.
+        avg, avg_grid = g["rating"].mean(), g["grid_median"].mean()
+        row.update({"Period avg": round(avg), "Grid median (period)": round(avg_grid),
+                    "Period vs grid": round(avg - avg_grid),
+                    "Period vs grid %": win_chance(avg - avg_grid)})
         if season_races is not None:
             row.update(best_season(g, season_races))
         if "team" in g.columns:
@@ -617,6 +636,11 @@ for c in ("Best season avg", "Grid median (best season)"):
         help=BASE_HELP[c].format(one=cfg["one"]), format="%d")
 col_config["Best season vs grid"] = st.column_config.NumberColumn(
     help=BASE_HELP["Best season vs grid"].format(one=cfg["one"]), format="%+d")
+for c in ("Period avg", "Grid median (period)"):
+    col_config[c] = st.column_config.NumberColumn(
+        help=BASE_HELP[c].format(one=cfg["one"]), format="%d")
+col_config["Period vs grid"] = st.column_config.NumberColumn(
+    help=BASE_HELP["Period vs grid"].format(one=cfg["one"]), format="%+d")
 # Win chances, stored as whole percentages (0-100).
 for c, when in WIN_WHEN.items():
     col_config[c] = st.column_config.NumberColumn(
