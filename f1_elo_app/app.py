@@ -111,7 +111,8 @@ BASE_COLUMNS = ["Start", "End", "Grid median at end", "End vs grid", "End vs gri
                 "Peak vs grid %", "Peak pos score", "Peak at",
                 "Best season", "Best season avg", "Grid median (best season)",
                 "Best season vs grid", "Best season vs grid %", "Season pos score",
-                "Races"]
+                "Period avg", "Grid median (period)", "Period vs grid",
+                "Period vs grid %", "Period pos score", "Overall pos score", "Races"]
 
 # Positional scores: the average of a row's positions (1 = highest) by a
 # rating and its gap to the grid median, within the list as shown (after the
@@ -125,11 +126,26 @@ POS_SCORES = {
     "Peak pos score": ("Peak", "Peak vs grid"),
     "Peak team pos score": ("Peak team rating", "Peak team vs grid"),
     "Season pos score": ("Best season avg", "Best season vs grid"),
+    "Period pos score": ("Period avg", "Period vs grid"),
 }
 POS_HELP = ("The average of this row's positions in the list shown (1 = highest) "
             "by {a} and {b}: how high the rating was, and how far above the "
             "typical one on the grid at the time. Lower = better; 1.0 = first in "
             "both. It's relative to the list, so it changes with the filters.")
+# The combined score: the plain average of the pos scores over three time
+# spans (one race, one season, the whole period), so no single one decides.
+# Equal weights, as there's no ground truth to tune them on. Blank when any
+# part is (no qualifying best season). The top-N cut uses Best season avg,
+# the middle span.
+OVERALL = "Overall pos score"
+OVERALL_PARTS = ["Peak pos score", "Season pos score", "Period pos score"]
+OVERALL_HELP = ("The average of Peak, Season and Period pos score: the best "
+                "single race, the best season and the whole period (by default "
+                "the career), weighted equally. Lower = better. Blank without a "
+                "qualifying best season. Relative to the list, like the other "
+                "pos scores.")
+# What the top-N cut ranks by when ranking by each score (all rank lowest first).
+SCORE_CUT = {s: cols[0] for s, cols in POS_SCORES.items()} | {OVERALL: "Best season avg"}
 RANK_OPTIONS = ["End", "Peak", "Change"]
 DEFAULT_COLUMNS = ["Start", "End", "Change", "Peak", "Peak at", "Races"]
 BASE_HELP = {
@@ -152,6 +168,17 @@ BASE_HELP = {
     "Best season vs grid": "Best season avg minus Grid median (best season): how "
                            "far above the typical {one} they stood across that "
                            "season.",
+    "Period avg": "The average rating after each of their races in the whole period "
+                  "shown (every season, not just the best). With no seasons picked "
+                  "and the period left at its default, that's the whole career. "
+                  "Few races make it noisy: use Minimum races.",
+    "Grid median (period)": "The grid median averaged over the same races (each "
+                            "{one} counted once per race), so each race counts as "
+                            "much as in Period avg.",
+    "Period vs grid": "Period avg minus Grid median (period): how far above the "
+                      "typical {one} they stood on average across the period. "
+                      "Fairer than Period avg across eras, because the grid level "
+                      "changes over time.",
 }
 # A season counts for "best season" only with at least this share of its
 # races (within the period), so a one-off drive can't be someone's best.
@@ -168,7 +195,8 @@ WIN_HELP = {
                     "wins about 3 in 4, 90% = 9 in 10).",
 }
 WIN_WHEN = {"End vs grid %": "at the end", "Peak vs grid %": "at the peak",
-            "Best season vs grid %": "averaged over the best season"}
+            "Best season vs grid %": "averaged over the best season",
+            "Period vs grid %": "averaged over the whole period"}
 
 
 def win_chance(gap: float) -> int | None:
@@ -247,6 +275,11 @@ def summary(view: pd.DataFrame, labels: dict, column: str,
                "Grid median at peak": round(peak["grid_median"]),
                "Peak vs grid": round(peak_gap), "Peak vs grid %": win_chance(peak_gap),
                "Peak at": f"{peak['name']} {peak['year']}", "Races": len(g)}
+        # The whole period: every race of theirs in it, each counted once.
+        avg, avg_grid = g["rating"].mean(), g["grid_median"].mean()
+        row.update({"Period avg": round(avg), "Grid median (period)": round(avg_grid),
+                    "Period vs grid": round(avg - avg_grid),
+                    "Period vs grid %": win_chance(avg - avg_grid)})
         if season_races is not None:
             row.update(best_season(g, season_races))
         if "team" in g.columns:
@@ -419,8 +452,9 @@ with st.sidebar:
     st.toggle("Top positions only", key=f"{v}:top_on",
               help="Keep only the top positions by the 'Rank by' choice above the "
                    "table (End, Peak or Change). Ranking by a positional score cuts "
-                   "by its rating (Peak pos score: the top N by Peak), then orders "
-                   "that list by the score. Equal values share a position, so a "
+                   "by its rating (Peak pos score: the top N by Peak; Overall pos "
+                   "score: by Best season avg), then orders that list by the "
+                   "score. Equal values share a position, so a "
                    "tie at the cut-off can show a few more.")
     st.number_input("Show the top", min_value=1, step=1, key=f"{v}:top_n",
                     disabled=not state[f"{v}:top_on"])
@@ -485,7 +519,7 @@ state[f"{v}:columns"] = [c for c in state[f"{v}:columns"] if c in optional]
 
 # Rank by offers a positional score only while its column is shown; if the
 # chosen one was hidden, fall back to End.
-rank_options = RANK_OPTIONS + [c for c in POS_SCORES if c in state[f"{v}:columns"]]
+rank_options = RANK_OPTIONS + [c for c in SCORE_CUT if c in state[f"{v}:columns"]]
 state.setdefault("rank_by", "End")
 if state["rank_by"] not in rank_options:
     state["rank_by"] = state["_rank_by"] = "End"
@@ -502,14 +536,15 @@ if state[f"{v}:top_on"]:
     # The list's boundary: the top N by a rating. Ranking by a positional
     # score cuts by its rating (Peak pos score -> Peak), then reorders.
     # Rows with no value to cut by (no qualifying best season) drop out.
-    cut_by = POS_SCORES[rank_by][0] if rank_by in POS_SCORES else rank_by
+    cut_by = SCORE_CUT.get(rank_by, rank_by)
     table = table[table[cut_by].rank(method="min", ascending=False) <= state[f"{v}:top_n"]]
 # Positional scores, relative to the list as it now stands.
 for score, cols in POS_SCORES.items():
     if all(c in table.columns for c in cols):
         table[score] = sum(table[c].rank(method="min", ascending=False)
                            for c in cols) / len(cols)
-low_first = rank_by in POS_SCORES  # a lower score is better
+table[OVERALL] = table[OVERALL_PARTS].mean(axis=1, skipna=False)
+low_first = rank_by in SCORE_CUT  # a lower score is better
 table = table.sort_values(rank_by, ascending=low_first)  # blanks go last
 table.insert(0, "#", table[rank_by].rank(method="min", ascending=low_first,
                                          na_option="bottom").astype(int))
@@ -617,6 +652,11 @@ for c in ("Best season avg", "Grid median (best season)"):
         help=BASE_HELP[c].format(one=cfg["one"]), format="%d")
 col_config["Best season vs grid"] = st.column_config.NumberColumn(
     help=BASE_HELP["Best season vs grid"].format(one=cfg["one"]), format="%+d")
+for c in ("Period avg", "Grid median (period)"):
+    col_config[c] = st.column_config.NumberColumn(
+        help=BASE_HELP[c].format(one=cfg["one"]), format="%d")
+col_config["Period vs grid"] = st.column_config.NumberColumn(
+    help=BASE_HELP["Period vs grid"].format(one=cfg["one"]), format="%+d")
 # Win chances, stored as whole percentages (0-100).
 for c, when in WIN_WHEN.items():
     col_config[c] = st.column_config.NumberColumn(
@@ -626,5 +666,6 @@ col_config["Peak team vs grid %"] = st.column_config.NumberColumn(
 for c, (a, b) in POS_SCORES.items():
     col_config[c] = st.column_config.NumberColumn(
         help=POS_HELP.format(a=a, b=b), format="%.2f")
+col_config[OVERALL] = st.column_config.NumberColumn(help=OVERALL_HELP, format="%.2f")
 st.dataframe(table, hide_index=True, width="stretch",
              column_order=["#", cfg["column"], *shown_cols], column_config=col_config)
