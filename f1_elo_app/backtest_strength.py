@@ -50,8 +50,11 @@ about 86% of the variance in results, the driver about 14%: a sanity check,
 not a target.
 
 Writes the grid to output/backtest_strength.csv. The chosen setting belongs
-in prediction_car_weight / prediction_scale in f1elo/config.py (the engine's
-own settings are left alone).
+in prediction_car_weight / prediction_scale in f1elo/config.py (all pairs:
+a one-step view where a retirement loses to every finisher), or with
+--pairs classified in finish_car_weight / finish_scale (the finishing order
+of the race simulation, which draws retirements separately). The engine's
+own settings are left alone.
 """
 from __future__ import annotations
 
@@ -190,6 +193,9 @@ def main() -> None:
     pw, ps = cfg.prediction_car_weight, cfg.prediction_scale
     if (pw, ps) not in {(lam, sc), (bw, bs)}:
         candidates.append((f"config prediction: D + {pw:g}C, s {ps:g}", 1.0, pw, ps))
+    fw_, fs_ = cfg.finish_car_weight, cfg.finish_scale
+    if (fw_, fs_) not in {(lam, sc), (bw, bs), (pw, ps)}:
+        candidates.append((f"config finish: D + {fw_:g}C, s {fs_:g}", 1.0, fw_, fs_))
 
     print(f"\n=== Candidates (w and s fitted on {tune} only) ===")
     for label, spec in periods.items():
@@ -242,10 +248,12 @@ def main() -> None:
           "Var(S) from the D-C covariance;\ncorr_dc = correlation of D and C "
           "within races.")
 
-    print(f"\nBest on {tune}: prediction_car_weight = {bw:g}, "
-          f"prediction_scale = {bs:g}")
-    print(f"In f1elo/config.py:    prediction_car_weight = {pw:g}, "
-          f"prediction_scale = {ps:g}")
+    names = (("finish_car_weight", "finish_scale", fw_, fs_)
+             if args.pairs == "classified" else
+             ("prediction_car_weight", "prediction_scale", pw, ps))
+    print(f"\nBest on {tune}: {names[0]} = {bw:g}, {names[1]} = {bs:g}")
+    print(f"In f1elo/config.py:    {names[0]} = {names[2]:g}, "
+          f"{names[1]} = {names[3]:g}")
     print(f"Wrote {out}")
 
 
