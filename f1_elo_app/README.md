@@ -16,7 +16,8 @@ f1_elo_app/
 │   ├── analysis.py         # leaderboards, histories, percentiles
 │   ├── strength.py         # pre-race strengths D + w*C, for race predictions
 │   ├── reliability.py      # each car's chance of not finishing
-│   └── simulate.py         # race simulation: chance of every finishing position
+│   ├── simulate.py         # race simulation: chance of every finishing position
+│   └── calibration.py      # scores, baselines and calibration of the race predictions
 ├── run_elo.py              # CLI: load -> compute -> save -> print summaries
 ├── predict_race.py         # CLI: a race's prediction table (next or past race)
 ├── backtest_*.py           # backtests that choose the settings in config.py
@@ -159,17 +160,28 @@ Two settings, for two uses:
 finishing position. Each simulated race has three steps:
 
 1. **Retirements**: every car retires with its own chance P(DNF)
-   (`f1elo/reliability.py`, below), independently.
-2. **Order of the finishers**: Plackett-Luce on `S = D + 1.25*C` with weights
-   `10^(S/525)`. Positions are filled one by one, each by a remaining car
-   with probability proportional to its weight. For two cars that both
-   finish, P(A ahead of B) = `expected_score(S_a, S_b, 525)`. It is sampled
-   with the Gumbel-max trick (sort `S*ln(10)/525 + Gumbel noise`), which is
-   exactly Plackett-Luce and fully vectorised.
+   (`f1elo/reliability.py`, below). The cars share a race factor
+   (`dnf_race_corr` = 0.04, a Gaussian copula): each car keeps exactly its
+   own chance, but in some races many retire together (a first-lap
+   pile-up, rain), so the number of finishers varies as much as in real
+   races.
+2. **Order of the finishers**: Plackett-Luce on `S = D + 1.25*C`. Places
+   are filled one by one, each by a remaining car with probability
+   proportional to its weight: `10^(S/400)` for the first 3 places
+   (`finish_top_scale` / `finish_top_places`), `10^(S/525)` for the rest
+   (`finish_scale`). The front of a race is more predictable than the
+   midfield, and one scale can't fit both (see the calibration section).
+   It is sampled with the Gumbel-max trick (sort `S*ln(10)/scale + Gumbel
+   noise`, the top places one at a time), which is exactly Plackett-Luce
+   and fully vectorised.
 3. **Retired cars** get the `DNF` outcome instead of a position.
 
-By default it runs 10,000 races with seed 0, which takes about 0.02 s for a
-22-car field.
+By default it runs 10,000 races, which takes a few hundredths of a second
+for a 22-car field. Each race has its own seed (seed 0 combined with the
+raceId), and its cars are simulated strongest first, so results are
+repeatable and don't depend on how the rows were sorted. `win` is the exact
+chance given each simulated set of finishers, which has less Monte Carlo
+noise than counting wins; `P1` is the share of simulated wins.
 
 ```python
 from f1elo.simulate import predict_race, predict_next_race, summary
@@ -244,13 +256,155 @@ py backtest_reliability.py          # base-rate baseline, full grid, rating step
 py backtest_reliability.py --team-races 10 40 --team-races-increment 5 --no-ratings
 ```
 
-Known limits, possible later improvements:
-- Retirements are drawn independently, so the number of finishers varies
-  less than in real races. A first-lap crash or rain takes out several cars
-  at once. The variance of finishers per race is 4.1 in the model vs 5.9 in
-  reality on 1990-2022.
-- Newcomers' strengths could get more spread, using `driver_confidence`,
-  which the strength frames carry.
+## How far to trust the race predictions (calibration)
+
+`backtest_calibration.py` scores every race from 1990 on, from information
+available beforehand, against fair baselines. Settings are chosen on
+1990-2022; 2023-2026 is the holdout. The engine is replayed once, not per
+race (`f1elo/calibration.py`), and the per-race prediction tables are cached
+in `output/race_predictions_<stage>.parquet`. A cached table is identical to
+what `predict_race` gives.
+
+```bash
+py backtest_calibration.py                      # pre-race: scores, baselines, calibration, experiments (~9 min)
+py backtest_calibration.py --experiments none   # just the scores and calibration (~2 min first time, then seconds)
+py backtest_calibration.py --stage post_quali   # after qualifying, vs results by grid slot
+py backtest_calibration.py --stage both --no-save
+py backtest_calibration.py --experiments finish --top-scale 300 500 --top-scale-increment 25
+```
+
+```python
+from f1elo.calibration import cached_predictions, race_table
+preds = cached_predictions("pre")     # every race; "post_quali" for after qualifying
+race_table(preds, 1170)               # one race, like predict_race
+```
+
+It writes, for the app's calibration page, `output/calibration_scores_<stage>.csv`
+(every predictor × period × score, with intervals), `calibration_bands_<stage>.csv`,
+`calibration_finishers_<stage>.csv` (races with k retirements, predicted vs actual)
+and `calibration_experiments_<stage>.csv` (the experiment grids).
+
+**Scores** (lower is better):
+- winner log loss (per race)
+- podium and points log loss and Brier score (per car). Points means the
+  season's scoring places.
+- ranked probability score (RPS) over P1 ... Pn then DNF
+- DNF log loss
+- log loss of the number of finishers
+
+Chances from simulation counts are floored at 0.5 / sims (5e-05) before
+taking logs; the exact win chance needs no floor. Intervals are 95%, from
+resampling races; a baseline's interval is for its difference from the
+model.
+
+**Pre-race, model vs baselines** (log loss unless marked):
+
+| predictor | win 1990-2022 | podium | points | RPS | win 2023-26 | podium | points | RPS |
+|---|---|---|---|---|---|---|---|---|
+| **model** | **1.728** | **0.2481** | **0.4720** | **0.1606** | 1.581 | **0.2597** | 0.4948 | **0.1291** |
+| uniform (all cars alike, base DNF rate) | 3.083 | 0.3984 | 0.6378 | 0.1970 | 3.017 | 0.4169 | 0.6921 | 0.1781 |
+| base DNF rate + the model's order | 1.751 | 0.2496 | 0.4778 | 0.1639 | 1.598 | 0.2597 | **0.4943** | 0.1292 |
+| all pairs 1.875 / 1175, no retirement model | 2.123 | 0.2806 | 0.4861 | 0.1697 | 2.048 | 0.2971 | 0.5079 | 0.1355 |
+| strength rank (results of the k-th strongest car) | 1.747 | 0.2519 | 0.4840 | 0.1636 | **1.537** | 0.2677 | 0.5290 | 0.1351 |
+
+- In 1990-2022 the model beats every baseline on points and RPS, with
+  intervals clear of zero. It also beats every baseline on podium; only
+  the gap to "base DNF rate + order" (+0.0015) has an interval touching
+  zero.
+- On the holdout it beats uniform, all pairs and strength rank on podium,
+  points and RPS. It ties with "base DNF rate + order", which differs only
+  in the retirement chance. That model's gain is real in 1990-2022
+  (points +0.006, RPS +0.003) and in DNF log loss on both periods (0.3744
+  vs 0.3807). It is too small to show in the race scores of 91 holdout
+  races.
+- The strength-rank table is fitted on 1990-2022, so it is scored
+  in-sample there. On holdout winners it is 0.044 better than the model,
+  but the interval is -0.121 to +0.039: no clear difference. It is clearly
+  worse on podium, points and RPS.
+- Splitting retirements from the order is clearly better than the single
+  all-pairs model on every score.
+- Holdout intervals for the model: winner 1.43-1.73, podium 0.242-0.278,
+  points 0.462-0.529.
+
+**After qualifying** (ratings after that weekend's qualifying pass, and the
+grid slot in the retirement chance), against the historical results from
+each grid slot:
+
+| predictor | win 1990-2022 | podium | points | RPS | win 2023-26 | podium | points | RPS |
+|---|---|---|---|---|---|---|---|---|
+| model | 1.675 | 0.2408 | **0.4625** | **0.1589** | 1.523 | 0.2498 | **0.4805** | **0.1254** |
+| grid slot | **1.567** | 0.2408 | 0.4850 | 0.1638 | **1.265** | **0.2364** | 0.5198 | 0.1295 |
+
+Qualifying helps the model: points 0.4720 → 0.4625 before vs after. But the
+grid slot predicts the winner better (1990-2022 by 0.107, interval 0.016 to
+0.197; holdout by 0.26, interval crosses zero). Pole position carries race
+pace that the ratings don't fully absorb. On points and RPS the model is
+clearly better.
+
+**Calibration** (`output/calibration_bands_<stage>.csv`): predicted vs actual
+frequency in 10 bands, for win, podium, points (per points era: top 6 /
+8 / 10) and DNF.
+- **DNF and points**: well calibrated, mostly within 2 standard errors. The
+  exception is the safest points finishers in the top-10 era (predicted
+  88%, actual 84%): a front-runner's bad day is a little more likely than
+  the model says.
+- **Win**: good from 2% up, apart from a 30-40% band that won a little
+  more often (42%). Long shots below 2% win less often than predicted
+  (0.5% vs 0.2%). On the holdout, a dominant car is under-rated: chances of
+  50-60% won 11 of 12 times.
+- **Podium**: the least well calibrated. Long shots are a little too high
+  and strong favourites too confident: podium chances above 80% came off
+  73% of the time in 1990-2022, 85% on the 39 holdout cases.
+- **Number of finishers**: mean right; spread right with the shared factor
+  (variance ratio 0.97 tune, 1.01 holdout).
+
+**How far to trust them**: points chances most, then podium, then win.
+Points are well calibrated in every era and clearly beat every baseline. On
+podium the model is the best pre-race predictor, but favourites are a bit
+overconfident. Win chances are sound in the 5-50% range, but 2023-2026 has
+only 91 winners, so holdout differences of 0.1 in winner log loss are
+within noise. After qualifying, the grid alone is as good or better for
+who wins.
+
+**Experiments**, each kept only if it improved 1990-2022 and didn't hurt
+2023-2026:
+
+1. **Shared race factor for retirements: kept** (`dnf_race_corr` 0.04).
+   Fitted to the variance of finishers per race (matched at 0.037).
+   - Finisher-count log loss 2.302 → 2.261 / 1.939 → 1.914 (tuning /
+     holdout).
+   - Race scores unchanged within Monte Carlo noise.
+2. **Finishing order tuned on whole results: kept** (first 3 places at
+   400, the rest at 525, car weight 1.25).
+   - The exact Plackett-Luce likelihood of real finishing orders wants a
+     scale of about 300 for the winner, 400 for the top 3 and 650+ for the
+     whole order. The pairwise 525 left win chances too flat.
+   - Tuning / holdout: winner 1.802 → 1.728 / 1.700 → 1.582; podium
+     0.2524 → 0.2481 / 0.2648 → 0.2607.
+   - Points and RPS unchanged or slightly better.
+   - One sharper scale for the whole order would cost points (0.4733).
+3. **Extra spread for newcomers: not kept** (`finish_newcomer_spread` 0).
+   - Every amount made the scores worse, rookies' own included (first 20
+     starts).
+   - Rookies do beat their ratings slightly: 88 podiums vs 78 predicted.
+     That is a level bias, not missing spread.
+4. **Grid slot in the retirement chance (after qualifying): kept**
+   (`dnf_grid_a` / `dnf_grid_b`).
+   - The front of the grid retires a little less. DNF log loss 0.5531 →
+     0.5528 / 0.3737 → 0.3726, and every race score improves slightly.
+   - A pit-lane flag was dropped: grid 0 also marks cars that withdrew
+     before the start, which isn't known after qualifying.
+5. **Era starts: not changed.**
+   - The first 7 races of a new regulation era have more retirements than
+     predicted: 25.5% vs 20.3% (1998-2026), 23% vs 13% in 2026.
+   - A fitted shift didn't help when tested on each tuning-period era start
+     in turn (2009 went the other way), so the retirement chance is
+     probably too low at the next era start.
+
+Data quirks: "did not start" counts as a retirement, as in the engine.
+Sprints aren't modelled. A classified car's place is its rank among the
+classified cars (3 races in the 2023-24 data give a disqualified car a
+classified place at the back). The 1950s Indianapolis 500 is left out.
 
 ## Notes vs. the original notebook
 

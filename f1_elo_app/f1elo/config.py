@@ -225,6 +225,50 @@ class EloConfig:
     finish_car_weight: float = 1.25
     finish_scale: float = 525.0
 
+    # The front of the race: the first finish_top_places places are filled
+    # one at a time with Plackett-Luce at finish_top_scale (sharper), the
+    # rest with finish_scale. 0 places = off (one scale for the whole order).
+    # Why: one scale can't fit both ends of the order. The exact
+    # Plackett-Luce likelihood of the real finishing orders (1990-2022)
+    # wants a scale of ~300 for the winner, ~400 for the top 3 and 650+ for
+    # the whole classified order; pairs (above) settle in between at 525,
+    # which made win and podium chances too flat (cars given 24% won 34% of
+    # the time). Tuned on whole results (backtest_calibration.py
+    # --experiments finish, 2,000 simulations per race), best podium log
+    # loss on 1990-2022 at w 1.25, top 400 for 3 places; tune / holdout
+    # 2023-2026, vs one scale at 525:
+    #   winner log loss  1.802 -> 1.728   /  1.700 -> 1.582
+    #   podium log loss  0.2524 -> 0.2481 /  0.2648 -> 0.2607
+    #   points log loss  0.4720 -> 0.4720 /  0.4949 -> 0.4948
+    #   RPS              0.1607 -> 0.1606 /  0.1294 -> 0.1291
+    # Flat nearby: top 375-450 with 3-6 places and w 1.125-1.375 are within
+    # 0.0005 on podium; winner log loss alone would prefer 350 (1.713).
+    finish_top_scale: float = 400.0
+    finish_top_places: int = 3
+
+    # Extra spread for drivers the engine isn't sure of: each simulated race
+    # adds normal noise with standard deviation finish_newcomer_spread *
+    # (1 - driver confidence) rating points to the driver's strength.
+    # 0 = off. Tried 50-200 (backtest_calibration.py --experiments
+    # newcomer): every value made the 1990-2022 scores worse, rookies' own
+    # included (first 20 starts: podium log loss 0.0906 at 0, 0.0915 at 50,
+    # 0.0920 at 200). Rookies do beat their ratings slightly (88 podiums vs
+    # 78 predicted, 438 points finishes vs 412) -- a level, not a spread.
+    finish_newcomer_spread: float = 0.0
+
+    # Shared race factor for retirements (f1elo/simulate.py,
+    # draw_retirements): the correlation between cars' chances of trouble
+    # in the same race (a Gaussian copula). Each car keeps its own P(DNF);
+    # only how often many cars retire together changes. 0 = independent.
+    # Fitted to the variance of the number of finishers per race
+    # (backtest_calibration.py --experiments corr, exact distributions):
+    # independent draws give 4.1 vs 5.9 actual on 1990-2022 (ratio 1.44);
+    # 0.04 gives 6.0 (ratio 0.97; matched at 0.037), holdout ratio 1.32 ->
+    # 1.01. Log loss of the number of finishers 2.302 -> 2.261 (tune),
+    # 1.939 -> 1.914 (holdout), best at 0.04 on both. Win / podium / points
+    # / RPS are unchanged within noise (podium +0.0001, intervals across 0).
+    dnf_race_corr: float = 0.04
+
     # Retirement model (f1elo/reliability.py): each car's chance of not
     # finishing, from pre-race data only. Counts over the last N races,
     # shrunk toward the field's recent rate (base) by k entries' worth:
@@ -259,6 +303,24 @@ class EloConfig:
     dnf_logit_blend: float = 0.939
     dnf_logit_car: float = -0.020
     dnf_logit_driver: float = -0.086
+
+    # After qualifying only (backtest_calibration.py --stage post_quali):
+    # the grid slot in the retirement chance,
+    #   logit P' = logit P(DNF) + a + b * slot + c * slot^2 + d * pit lane
+    # with slot = (grid - 1) / (n - 1), 0 = pole, 1 = last (grid 0 = last).
+    # All 0 = off; the pre-race prediction never uses them. Fitted on
+    # 1990-2022 by logistic regression with the model's logit as an offset:
+    # the front of the grid retires less (pole -0.10 logit, last +0.09).
+    # DNF log loss tune / holdout 0.5531 -> 0.5528 / 0.3737 -> 0.3726, and
+    # every race score improves a little on both (points 0.4635 -> 0.4625 /
+    # 0.4803 -> 0.4795). A slot^2 term adds nothing (0.5527 / 0.3727). A
+    # pit-lane flag looks better on 1990-2022 (0.5520) but grid 0 also marks
+    # cars that withdrew before the start, which isn't known after
+    # qualifying, and it is worse on the holdout (0.3729): not used.
+    dnf_grid_a: float = -0.099
+    dnf_grid_b: float = 0.188
+    dnf_grid_c: float = 0.0
+    dnf_grid_pitlane: float = 0.0
 
     # Sentinels in the raw data.
     dnf_sentinel: str = "\\N"   # finishing "position" value for did-not-finish
