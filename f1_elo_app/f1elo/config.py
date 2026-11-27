@@ -211,6 +211,55 @@ class EloConfig:
     prediction_car_weight: float = 1.875
     prediction_scale: float = 1175.0
 
+    # Finishing order among the cars that FINISH, for the race simulation
+    # (f1elo/simulate.py), which draws retirements separately (below). Same
+    # strength D + w*C, Plackett-Luce weights 10^(S / finish_scale), so
+    # P(A ahead of B | both classified) = expected_score(S_a, S_b,
+    # finish_scale). Tuned with backtest_strength.py --pairs classified,
+    # 1990-2022 (pairs with both cars classified): best 1.25 / 525, log
+    # loss 0.4221 (max. likelihood 1.228 / 510; w 1-1.5 with s 450-575
+    # within 0.0005); the engine's 0.875 / 400 0.4239. Holdout 2023-2026:
+    # 0.4492 vs 0.4517. Use prediction_car_weight / prediction_scale for
+    # a one-step view where a retirement just loses to every finisher;
+    # use these when retirements are modelled on their own.
+    finish_car_weight: float = 1.25
+    finish_scale: float = 525.0
+
+    # Retirement model (f1elo/reliability.py): each car's chance of not
+    # finishing, from pre-race data only. Counts over the last N races,
+    # shrunk toward the field's recent rate (base) by k entries' worth:
+    #   base   = field DNF share over its last dnf_base_races races
+    #   team   = (team DNFs + k_t * base) / (team entries + k_t), team's
+    #            last dnf_team_races races (all its cars)
+    #   driver = same over the driver's last dnf_driver_races races
+    #   blend  = (1 - dnf_driver_weight) * team + dnf_driver_weight * driver
+    #   logit P(DNF) = a + b * logit(blend) + c * car_rel + d * driver_rel
+    # car_rel / driver_rel = the pre-race car / driver rating minus the
+    # field's mean, per 100 points. a, b, c, d = 0, 1, 0, 0 is the plain
+    # blend.
+    # Tuned by log loss on "did this car retire" (position \N), 1990-2022,
+    # 2023 on held out (backtest_reliability.py); a, b, c, d by logistic
+    # regression on 1990-2022. Log loss, tune / holdout 2023-2026:
+    #   base rate alone (last 40 races)   0.5665 / 0.3808
+    #   blend                             0.5560 / 0.3762
+    #   blend + rating step (these)       0.5534 / 0.3744
+    # The grid is flat: base 20-60 races, team 20-30 races with k 0-20,
+    # driver 30-60 races with k 20-100, driver weight 0.3-0.7 all within
+    # 0.0005. The rating step also holds when fitted on 1990-2009 only and
+    # scored on 2010-2022 (0.4491 vs 0.4494 blend, 0.4537 base). Better
+    # drivers retire less (d), beyond what their own record says; the car
+    # rating adds little once the team's record is in (c).
+    dnf_base_races: int = 40
+    dnf_team_races: int = 20
+    dnf_team_shrink: float = 0.0
+    dnf_driver_races: int = 50
+    dnf_driver_shrink: float = 60.0
+    dnf_driver_weight: float = 0.6
+    dnf_logit_intercept: float = -0.116
+    dnf_logit_blend: float = 0.939
+    dnf_logit_car: float = -0.020
+    dnf_logit_driver: float = -0.086
+
     # Sentinels in the raw data.
     dnf_sentinel: str = "\\N"   # finishing "position" value for did-not-finish
     no_grid_sentinel: int = 0    # "grid" / qualifying value meaning no time (last)

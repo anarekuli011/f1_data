@@ -14,7 +14,10 @@ agree on who was expected to beat whom.
 ``prediction_scale`` in the config. They are kept apart from the engine's own
 ``driver_car_weight`` / ``elo_scale``: those were tuned for the rating
 updates (on teammate pairs), these for predicting whole-field results
-(backtest_strength.py).
+(backtest_strength.py), a retirement losing to every finisher. The race
+simulation (f1elo/simulate.py) draws retirements separately and orders the
+finishers with ``finish_car_weight`` / ``finish_scale`` instead (tuned on
+pairs where both cars finished); it passes that car weight in here.
 
 What carries over from the engine, and what doesn't
 ---------------------------------------------------
