@@ -1,4 +1,5 @@
-"""F1 ELO viewer: driver and constructor ratings over time.
+"""F1 ELO viewer: driver and constructor ratings over time, plus race
+predictions and their calibration (drawn by predictions_app.py).
 
 Run from the f1_elo_app folder (after `py run_elo.py`):
 
@@ -12,10 +13,11 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 
+import predictions_app
+from app_common import PALETTE, choice
 from f1elo import config, expected_score, updater
 
 RESULTS = config.OUTPUT_DIR / "results_with_elo.csv"
-PALETTE = px.colors.qualitative.Dark24 + px.colors.qualitative.Light24
 
 # Everything that differs between the two views.
 VIEWS = {
@@ -26,6 +28,8 @@ VIEWS = {
                      "column": "Constructor", "id": "constructorId", "rating": "EloRating",
                      "names": config.DATA_DIR / "constructors.csv"},
 }
+# The other views: race predictions and how far to trust them (predictions_app.py).
+PAGES = ["predictions", "calibration"]
 STATE_KEYS = ("sel", "seasons", "from", "to", "columns",
               "min_on", "min_races", "top_on", "top_n")
 # Filter defaults: both off; the numbers are what each box starts at.
@@ -317,7 +321,8 @@ state = st.session_state
 
 # Streamlit forgets a widget's value when the widget isn't drawn, which would wipe
 # the hidden view's selection. Re-saving the values each run keeps both views.
-for _key in [f"{v}:{k}" for v in VIEWS for k in STATE_KEYS] + ["line_style", "rank_by"]:
+for _key in ([f"{v}:{k}" for v in VIEWS for k in STATE_KEYS] + ["line_style", "rank_by"]
+             + list(predictions_app.STATE_KEYS)):
     if _key in state:
         state[_key] = state[_key]
 
@@ -404,60 +409,65 @@ if state.pop("refresh_period", False):
 
 # -- sidebar -----------------------------------------------------------------
 with st.sidebar:
-    v = st.radio("View", list(VIEWS), format_func=str.capitalize, horizontal=True,
-                 key="view")
-    cfg = VIEWS[v]
-    frame, labels = data[v]
+    v = st.radio("View", list(VIEWS) + PAGES, format_func=str.capitalize,
+                 horizontal=True, key="view")
+    if v == "predictions":
+        page_sel = predictions_app.sidebar()
+    elif v == "calibration":
+        page_sel = predictions_app.cal_sidebar()
+    else:
+        cfg = VIEWS[v]
+        frame, labels = data[v]
 
-    st.header(cfg["many"].capitalize())
-    st.multiselect("Choose one or more", options=list(labels), format_func=labels.get,
-                   placeholder="Type a name…", key=f"{v}:sel",
-                   on_change=on_selection_change, args=(v,))
+        st.header(cfg["many"].capitalize())
+        st.multiselect("Choose one or more", options=list(labels), format_func=labels.get,
+                       placeholder="Type a name…", key=f"{v}:sel",
+                       on_change=on_selection_change, args=(v,))
 
-    st.header("Period")
-    st.multiselect("Seasons", options=all_seasons, key=f"{v}:seasons",
-                   placeholder="All seasons", on_change=on_seasons_change, args=(v,))
-    options = race_options(v)
-    race_label = races["label"].to_dict()
-    st.selectbox("From race", options=options, format_func=race_label.get,
-                 key=f"{v}:from", on_change=on_race_change, args=(v,))
-    st.selectbox("To race", options=options, format_func=race_label.get,
-                 key=f"{v}:to", on_change=on_race_change, args=(v,))
+        st.header("Period")
+        st.multiselect("Seasons", options=all_seasons, key=f"{v}:seasons",
+                       placeholder="All seasons", on_change=on_seasons_change, args=(v,))
+        options = race_options(v)
+        race_label = races["label"].to_dict()
+        st.selectbox("From race", options=options, format_func=race_label.get,
+                     key=f"{v}:from", on_change=on_race_change, args=(v,))
+        st.selectbox("To race", options=options, format_func=race_label.get,
+                     key=f"{v}:to", on_change=on_race_change, args=(v,))
 
-    shown_races = visible_races(v)
-    sel = state[f"{v}:sel"]
-    in_period = frame.loc[frame["raceId"].isin(shown_races.index), "id"].unique()
-    to_add = len(set(in_period) - set(sel))
-    add_label = (f"All {cfg['many']} in this period are selected" if not to_add else
-                 f"Add 1 more {cfg['one']} from this period" if to_add == 1 else
-                 f"Add all {to_add} {cfg['many']} from this period")
-    st.button(add_label, on_click=add_from_period, args=(v,), disabled=not to_add,
-              key=f"{v}:add_all", width="stretch")
-    left, right = st.columns(2)
-    left.button("Reset period", on_click=reset_period, args=(v,), key=f"{v}:reset",
-                width="stretch")
-    right.button(f"Clear {cfg['many']}", on_click=clear_selection, args=(v,),
-                 key=f"{v}:clear", width="stretch", disabled=not sel)
-    st.caption(f"{len(shown_races)} races in this period.")
+        shown_races = visible_races(v)
+        sel = state[f"{v}:sel"]
+        in_period = frame.loc[frame["raceId"].isin(shown_races.index), "id"].unique()
+        to_add = len(set(in_period) - set(sel))
+        add_label = (f"All {cfg['many']} in this period are selected" if not to_add else
+                     f"Add 1 more {cfg['one']} from this period" if to_add == 1 else
+                     f"Add all {to_add} {cfg['many']} from this period")
+        st.button(add_label, on_click=add_from_period, args=(v,), disabled=not to_add,
+                  key=f"{v}:add_all", width="stretch")
+        left, right = st.columns(2)
+        left.button("Reset period", on_click=reset_period, args=(v,), key=f"{v}:reset",
+                    width="stretch")
+        right.button(f"Clear {cfg['many']}", on_click=clear_selection, args=(v,),
+                     key=f"{v}:clear", width="stretch", disabled=not sel)
+        st.caption(f"{len(shown_races)} races in this period.")
 
-    # Filters on the chart and the table, both off by default.
-    st.header("Filters")
-    for k, default in FILTER_DEFAULTS.items():
-        state.setdefault(f"{v}:{k}", default)
-    st.toggle("Minimum races", key=f"{v}:min_on",
-              help=f"Hide {cfg['many']} with fewer races than this in the selected "
-                   "period (the table's Races column).")
-    st.number_input("At least this many races in the period", min_value=1, step=1,
-                    key=f"{v}:min_races", disabled=not state[f"{v}:min_on"])
-    st.toggle("Top positions only", key=f"{v}:top_on",
-              help="Keep only the top positions by the 'Rank by' choice above the "
-                   "table (End, Peak or Change). Ranking by a positional score cuts "
-                   "by its rating (Peak pos score: the top N by Peak; Overall pos "
-                   "score: by Best season avg), then orders that list by the "
-                   "score. Equal values share a position, so a "
-                   "tie at the cut-off can show a few more.")
-    st.number_input("Show the top", min_value=1, step=1, key=f"{v}:top_n",
-                    disabled=not state[f"{v}:top_on"])
+        # Filters on the chart and the table, both off by default.
+        st.header("Filters")
+        for k, default in FILTER_DEFAULTS.items():
+            state.setdefault(f"{v}:{k}", default)
+        st.toggle("Minimum races", key=f"{v}:min_on",
+                  help=f"Hide {cfg['many']} with fewer races than this in the selected "
+                       "period (the table's Races column).")
+        st.number_input("At least this many races in the period", min_value=1, step=1,
+                        key=f"{v}:min_races", disabled=not state[f"{v}:min_on"])
+        st.toggle("Top positions only", key=f"{v}:top_on",
+                  help="Keep only the top positions by the 'Rank by' choice above the "
+                       "table (End, Peak or Change). Ranking by a positional score cuts "
+                       "by its rating (Peak pos score: the top N by Peak; Overall pos "
+                       "score: by Best season avg), then orders that list by the "
+                       "score. Equal values share a position, so a "
+                       "tie at the cut-off can show a few more.")
+        st.number_input("Show the top", min_value=1, step=1, key=f"{v}:top_n",
+                        disabled=not state[f"{v}:top_on"])
 
     st.header("Data")
     st.caption(f"Latest race: {races['label'].iloc[-1]}")
@@ -483,11 +493,12 @@ def dismiss_update():
 
 
 # -- main area ---------------------------------------------------------------
-st.title(cfg["title"])
-st.caption(f"Latest race: {races['label'].iloc[-1]} · grid median after it: "
-           f"**{latest_medians['drivers']:.0f}** for drivers, "
-           f"**{latest_medians['constructors']:.0f}** for teams "
-           "(each driver or team counted once).")
+if v in VIEWS:
+    st.title(cfg["title"])
+    st.caption(f"Latest race: {races['label'].iloc[-1]} · grid median after it: "
+               f"**{latest_medians['drivers']:.0f}** for drivers, "
+               f"**{latest_medians['constructors']:.0f}** for teams "
+               "(each driver or team counted once).")
 
 if "update_error" in state:
     st.error(f"**Update failed.** {state['update_error']}")
@@ -500,6 +511,14 @@ elif "update_report" in state:
     box = st.success if report["new"] or report["corrected"] else st.info
     box(f"**Data check for {report['seasons']}**\n\n{lines}\n\n{footer}")
     st.button("Dismiss", on_click=dismiss_update, key="dismiss_report")
+
+if v == "predictions":
+    predictions_app.page(page_sel, data["drivers"][1])
+    st.stop()
+if v == "calibration":
+    predictions_app.cal_page(page_sel)
+    st.stop()
+
 if not sel:
     st.info(f"Pick {cfg['many']} in the sidebar, or choose seasons and press "
             f"“Add all {cfg['many']} from this period”.")
@@ -557,22 +576,6 @@ view = view[view["label"].isin(table[cfg["column"]])]
 
 # Legend in leaderboard order: highest rating at the end of the period first.
 order = view.groupby("label")["rating"].last().sort_values(ascending=False).index.tolist()
-
-def keep_choice(key):
-    # Clicking the active option would deselect it; keep the last choice instead.
-    if state[key] is None:
-        state[key] = state[f"_{key}"]
-    state[f"_{key}"] = state[key]
-
-
-def choice(label, options, key, **kwargs) -> str:
-    """A segmented control that always has exactly one option picked."""
-    state.setdefault(key, options[0])
-    state.setdefault(f"_{key}", state[key])
-    st.segmented_control(label, options, key=key, on_change=keep_choice, args=(key,),
-                         **kwargs)
-    return state[key]
-
 
 smooth = choice("Line style", ["Steps", "Smooth"], "line_style",
                 label_visibility="collapsed",
