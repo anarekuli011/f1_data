@@ -66,6 +66,7 @@ Two-car teams are unaffected by both.
 from __future__ import annotations
 
 from collections import Counter
+from collections.abc import Callable
 
 import pandas as pd
 
@@ -393,13 +394,18 @@ class EloEngine:
         return race, dict(self.constructor_elo), dict(self.driver_elo)
 
     def process_ordered(self, year: int, rnd: int, quali_order: pd.DataFrame,
-                        race_order: pd.DataFrame) -> None:
+                        race_order: pd.DataFrame,
+                        after_quali: Callable[[], None] | None = None) -> None:
         """Process one race whose entries are already sorted.
 
         ``quali_order`` comes from ``_order_by_quali`` (sorted, with a
         ``quali_rank`` column) and ``race_order`` from ``_order_by_position``;
         both need driverId and constructorId. Backtests call this directly so
         they share the exact same logic.
+
+        ``after_quali``, if given, is called between the qualifying and race
+        passes, so a caller can read the post-qualifying ratings (what a
+        prediction made after qualifying would use). It must not change them.
         """
         cfg = self.cfg
         self.era_conf = self.era_confidence(year, rnd)
@@ -422,6 +428,8 @@ class EloEngine:
                                is_race=False)
         self._driver_pass(quali_order, "quali_rank", cfg.no_grid_sentinel,
                           is_race=False, car_elo=cars)
+        if after_quali is not None:
+            after_quali()
 
         # ----- RACE (high K), ordered by finishing position -----
         cars = snap(self.constructor_elo)

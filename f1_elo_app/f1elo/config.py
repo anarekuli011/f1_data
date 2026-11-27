@@ -192,6 +192,25 @@ class EloConfig:
     # Standard ELO logistic scale (the "400" in the classic formula).
     elo_scale: float = 400.0
 
+    # Race predictions (f1elo/strength.py), not the rating updates: each
+    # car's pre-race strength is D + prediction_car_weight * C, and car A
+    # beats car B with probability expected_score(S_a, S_b, prediction_scale).
+    # Kept apart from driver_car_weight / elo_scale, which are tuned for the
+    # engine's updates on teammate pairs; these are tuned on every pair of
+    # cars in a race, a retirement losing to every classified car
+    # (backtest_strength.py, 1990-2022, pre-race ratings).
+    # Best 1.875 / 1175 (log loss 0.5592 vs 0.6209 with the engine's
+    # 0.875 / 400, 0.5667 with the car alone); a flat ridge, w 1.5-2.25 with
+    # s 1000-1400 within 0.0005. Holds on 2023-2026: 0.5246 vs 0.5403.
+    # Why flatter and more car than the engine: 43% of those pairs were
+    # decided by a retirement, which ratings barely predict (hence the
+    # larger scale) and which is mostly the car (hence the larger weight).
+    # On pairs with both cars classified the best is 1.25 / 525, with
+    # 0.875 / 400 only 0.002 worse -- what a race model that handles
+    # retirements separately should use (--pairs classified).
+    prediction_car_weight: float = 1.875
+    prediction_scale: float = 1175.0
+
     # Sentinels in the raw data.
     dnf_sentinel: str = "\\N"   # finishing "position" value for did-not-finish
     no_grid_sentinel: int = 0    # "grid" / qualifying value meaning no time (last)
