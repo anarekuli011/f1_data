@@ -9,11 +9,15 @@
 itself takes well under a second)
 
 Each race is simulated --sims times (default 10,000, --seed 0): first every
-car retires or not, with its own chance (f1elo/reliability.py), then the
-cars that finish are ordered by Plackett-Luce on their pre-race strengths
-D + finish_car_weight * C (f1elo/simulate.py). For a past race everything is
-pre-race: the ratings before that race and retirement counts from earlier
-races only.
+car retires or not, with its own chance (f1elo/reliability.py) and a shared
+race factor (dnf_race_corr), then the cars that finish are ordered by
+Plackett-Luce on their pre-race strengths D + finish_car_weight * C, the
+first finish_top_places places at the sharper finish_top_scale
+(f1elo/simulate.py). For a past race everything is pre-race: the ratings
+before that race and retirement counts from earlier races only. For every
+past race at once, and the after-qualifying version, see
+backtest_calibration.py (its cache, output/race_predictions_*.parquet, has
+the same tables).
 
 Columns: driver, team, D (driver rating), C (car rating), strength, P(DNF)
 (the input chance of not finishing), win / podium / points chances, the
@@ -87,8 +91,11 @@ def main() -> None:
     print(f"\n{info.get('year')} round {info.get('round')}: {info.get('name')} "
           f"(raceId {info.get('raceId')}; {what}) -- {args.sims:,} simulations, "
           f"seed {args.seed}, points = top {pts}  [{time.time() - t0:.0f} s]")
+    top = (f", the first {cfg.finish_top_places} places at {cfg.finish_top_scale:g}"
+           if cfg.finish_top_places else "")
     print(f"strength = D + {cfg.finish_car_weight:g} C, Plackett-Luce scale "
-          f"{cfg.finish_scale:g}; P(DNF) from f1elo/reliability.py")
+          f"{cfg.finish_scale:g}{top}; P(DNF) from f1elo/reliability.py, shared "
+          f"race factor {cfg.dnf_race_corr:g}")
 
     show = summary(table, args.positions).rename(columns={
         "driver_elo": "D", "constructor_elo": "C", "p_dnf": "P(DNF)",

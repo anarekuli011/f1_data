@@ -34,12 +34,17 @@ with 2023 onwards held out (backtest_reliability.py; numbers in config.py).
 Log loss falls from 0.5665 (base rate alone) to 0.5560 (blend) to 0.5534
 (with the rating step) on 1990-2022, and from 0.3808 to 0.3744 on 2023-2026.
 
-Retirements are drawn independently per car. On average the number of
-finishers comes out right (1990-2022: 0.003 cars off per race), but races
-vary more than independent draws allow -- a first-lap crash or a wet race
-takes out several cars at once. The variance of finishers per race around
-the expected number is 5.9 vs the model's 4.1 on 1990-2022 (2.9 vs 2.2 on
-2023-2026). A shared race-level factor would fix that; not built yet.
+On average the number of finishers comes out right (1990-2022: 0.003 cars
+off per race), but races vary more than independent draws allow -- a
+first-lap crash or a wet race takes out several cars at once. The variance
+of finishers per race around the expected number is 5.9 vs 4.1 for
+independent draws on 1990-2022 (2.9 vs 2.2 on 2023-2026). The simulation
+therefore draws retirements with a shared race factor (dnf_race_corr, see
+f1elo/simulate.py), which keeps every car's chance here unchanged.
+
+After qualifying, the grid slot can shift the chance a little
+(dnf_grid_*; the front of the grid retires less), applied by
+f1elo/calibration.py for the post-qualifying predictions.
 """
 from __future__ import annotations
 
