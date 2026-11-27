@@ -18,6 +18,9 @@ f1_elo_app/
 │   ├── reliability.py      # each car's chance of not finishing
 │   ├── simulate.py         # race simulation: chance of every finishing position
 │   └── calibration.py      # scores, baselines and calibration of the race predictions
+├── app.py                  # Streamlit app: ratings, race predictions, calibration
+├── predictions_app.py      # the app's Predictions and Calibration views
+├── app_common.py           # helpers shared by the app's views
 ├── run_elo.py              # CLI: load -> compute -> save -> print summaries
 ├── predict_race.py         # CLI: a race's prediction table (next or past race)
 ├── backtest_*.py           # backtests that choose the settings in config.py
@@ -65,6 +68,55 @@ python run_elo.py --data ./archive2 --out ./output
 This writes `output/results_with_elo.csv` (every result row tagged with the
 constructor and driver ELO *after* that race) and prints the top constructors
 and drivers by peak rating.
+
+## The app
+
+```bash
+py -m streamlit run app.py        # after py run_elo.py
+```
+
+The sidebar's View picks one of four pages. "Check for new races" (under
+Data) pulls new results from the Jolpica API and recomputes everything; every
+page's caches are keyed on the data files, so they refresh after an update.
+
+- **Drivers / Constructors**: ratings over time, with a summary table.
+- **Predictions**: one race's chances from the race simulation below.
+  - Race: the next race (default) or any past race by season and round.
+    Stage: before or after qualifying. The next race is before qualifying
+    only, as there's no qualifying result for it yet.
+  - Main table: win, podium, points and DNF chances, and the expected
+    position if classified (retirements left out). The points column names
+    the season's scoring places, e.g. "Points (top 6)" before 2003. Tiny
+    chances show as "<0.1%", not 0.0%. Win is the exact chance per simulated
+    set of finishers (the `win` column). For past races, the actual result
+    is highlighted.
+  - Inputs (collapsed): D, C, strength, P(DNF), the grid slot after
+    qualifying, and the retirement counts.
+  - Heatmap of every driver × P1 ... Pn plus DNF, with the actual results
+    outlined. Below it, one driver's chance of each position, and why their
+    P(DNF) is what it is: the team's and driver's recent retirements next to
+    the era rate.
+  - Next race: the entry list is copied from the latest race. "Change a
+    seat" puts another driver from the data in a car.
+  - Past races come from the calibration cache,
+    `output/race_predictions_<stage>.parquet`. Loading it takes under a
+    second; after new data it is rebuilt once, in about 75 s. The next race
+    is simulated on demand, in a few seconds. The numbers are identical to
+    `py predict_race.py` for the same race.
+- **Calibration**: how far to trust the predictions, read from the CSVs
+  `backtest_calibration.py` writes. It has plain-language trust notes,
+  predicted-vs-actual diagrams for win, podium, points and DNF, the model
+  vs baselines with 95% intervals, and the number of finishers per race.
+  Pick the stage, the period (1990-2022 tuning or 2023-2026 holdout) and
+  the predictor. If the CSVs are missing, the page says how to create them
+  (`py backtest_calibration.py`, plus `--stage post_quali`).
+
+The Predictions view reads every race through one function,
+`predictions_app.load_predictions`, which returns a standard table: one row
+per car with the inputs, P1 ... Pn, DNF, win, podium, points, exp_pos and
+actual. The model behind it is looked up in `predictions_app.SOURCES`, so
+another model that produces the same table needs only an entry there and a
+"Model" option.
 
 ## Using it as a library
 
