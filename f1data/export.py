@@ -14,12 +14,19 @@ FILE_NAMES = {"pit_stops": "pit_stops.csv", "lap_times": "lap_times.csv"}
 ZERO_IF_MISSING = {"results": {"grid"}, "sprint_results": {"grid"}}
 
 
-def export_csv(db: Database, out_dir: Path | str, skip_empty: bool = True) -> list[Path]:
+# Large per-lap tables, refreshed on their own (f1_elo_app/update_laps.py)
+# rather than by every quick update.
+LAP_TABLES = ["pit_stops", "lap_times"]
+
+
+def export_csv(db: Database, out_dir: Path | str, skip_empty: bool = True,
+               tables: list[str] | None = None) -> list[Path]:
+    """Write each table (or only ``tables``) as a Kaggle-style CSV."""
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     db.repair()
     written = []
-    for table in TABLES:
+    for table in (TABLES if tables is None else [t for t in TABLES if t in tables]):
         cur = db.conn.execute(f"SELECT * FROM {table}")
         rows = cur.fetchall()
         if skip_empty and not rows:

@@ -57,6 +57,13 @@ CREATE TABLE IF NOT EXISTS constructor_standings (
 CREATE INDEX IF NOT EXISTS ix_results_race ON results(raceId);
 CREATE INDEX IF NOT EXISTS ix_quali_race ON qualifying(raceId);
 CREATE INDEX IF NOT EXISTS ix_laps_race ON lap_times(raceId);
+CREATE INDEX IF NOT EXISTS ix_pits_race ON pit_stops(raceId);
+-- Which races' lap times / pit stops have been fetched (or imported), and how
+-- many rows came back, so a race with no data isn't asked for again and
+-- again. Not exported.
+CREATE TABLE IF NOT EXISTS fetch_log (
+    raceId INTEGER, dataset TEXT, rows INTEGER, source TEXT, fetched_at TEXT,
+    PRIMARY KEY (raceId, dataset));
 """
 
 # Child tables that are fully replaced whenever a race is re-fetched.
@@ -185,6 +192,18 @@ class Database:
                                   "WHERE constructorId IS NULL", [cid])
         self.conn.commit()
         
+    def log_fetch(self, race_id: int, dataset: str, rows: int, source: str) -> None:
+        """Record that a race's lap times / pit stops were fetched or imported."""
+        self.conn.execute(
+            "INSERT OR REPLACE INTO fetch_log (raceId, dataset, rows, source, fetched_at) "
+            "VALUES (?, ?, ?, ?, datetime('now'))", [race_id, dataset, rows, source])
+
+    def fetch_log(self, dataset: str) -> dict[int, tuple[int, str, str]]:
+        """raceId -> (rows, source, fetched_at) for one dataset."""
+        return {rid: (rows, src, at) for rid, rows, src, at in self.conn.execute(
+            "SELECT raceId, rows, source, fetched_at FROM fetch_log WHERE dataset=?",
+            [dataset])}
+
     def counts(self) -> dict[str, int]:
         return {t: self.conn.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0]
                 for t in TABLES}

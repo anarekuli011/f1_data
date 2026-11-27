@@ -146,9 +146,12 @@ def main():
                          "laps": "lap_times", "driverstandings": "driver_standings",
                          "constructorstandings": "constructor_standings"}
             # Races, drivers and teams come along inside the results responses.
+            # Lap times and pit stops are left out: refreshing a whole season
+            # of laps is ~300 requests. f1_elo_app/update_laps.py fetches only
+            # the races that are missing.
             datasets = ["results", "qualifying", "sprint"] + [
                 k for k in catalog.OPTIONAL
-                if k != "status" and table_for.get(k, k) in have]
+                if k not in ("status", "laps", "pitstops") and table_for.get(k, k) in have]
             run(client, db, datasets, args.season, args.season, refresh=True)
 
         elif args.cmd == "export":
