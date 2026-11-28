@@ -17,13 +17,17 @@ f1_elo_app/
 │   ├── strength.py         # pre-race strengths D + w*C, for race predictions
 │   ├── reliability.py      # each car's chance of not finishing
 │   ├── simulate.py         # race simulation: chance of every finishing position
-│   └── calibration.py      # scores, baselines and calibration of the race predictions
+│   ├── calibration.py      # scores, baselines and calibration of the race predictions
+│   └── features.py         # race feature table for the step 6 models
 ├── app.py                  # Streamlit app: ratings, race predictions, calibration
 ├── predictions_app.py      # the app's Predictions and Calibration views
 ├── app_common.py           # helpers shared by the app's views
 ├── run_elo.py              # CLI: load -> compute -> save -> print summaries
 ├── predict_race.py         # CLI: a race's prediction table (next or past race)
 ├── backtest_*.py           # backtests that choose the settings in config.py
+├── update_laps.py          # CLI: lap times and pit stops (Jolpica or the Kaggle files)
+├── build_features.py       # CLI: the feature table + coverage and signal reports
+├── test_features_leakage.py # CLI: checks no feature uses its own race or later
 ├── make_sample_data.py     # generates fake CSVs so you can test immediately
 ├── requirements.txt
 └── data/                   # <-- put the Kaggle CSVs here (see below)
@@ -457,6 +461,177 @@ Data quirks: "did not start" counts as a retirement, as in the engine.
 Sprints aren't modelled. A classified car's place is its rank among the
 classified cars (3 races in the 2023-24 data give a disqualified car a
 classified place at the back). The 1950s Indianapolis 500 is left out.
+
+## Race features (step 6 data)
+
+`f1elo/features.py` builds one row per car per race for the step 6
+models, with only what was known at that point of the weekend. Nothing is
+trained here; this is the data.
+
+```powershell
+py update_laps.py --plan                 # what lap / pit data is missing
+py update_laps.py --kaggle "C:\path\to\unzipped\kaggle"   # history, in seconds
+py update_laps.py                        # the rest from Jolpica (resumable)
+py build_features.py                     # all stages + reports (cached)
+py build_features.py --stage post_quali --form-races 5
+py test_features_leakage.py              # the leakage test (add --no-elo to skip the replays)
+```
+
+### Lap times and pit stops
+
+- **Sources.** `lap_times.csv` (1996 on) and `pit_stops.csv` (2011 on) in
+  `data/`, written from the f1_data database like the other CSVs.
+  - The quick way to get the history is the Kaggle "Formula 1 World
+    Championship" download. Unzip it anywhere and pass the folder to
+    `--kaggle`. Its race and driver numbers differ from this project's
+    (Hamilton is 1 there, 336 here), so rows are matched on
+    (year, round) and `driverRef`. Only races with no data yet are filled,
+    and unmatched rows are reported, never guessed.
+  - `py update_laps.py` fetches only the races that are still missing from
+    Jolpica: about 12 requests per race for laps, 1 for pit stops. The
+    full lap history from the API alone is about 7,000 requests, roughly
+    17 hours at the default 400 an hour.
+- **Kept apart from "Check for new races".** The quick update doesn't fetch
+  laps or pit stops and doesn't rewrite their CSVs, so it stays fast and
+  can't be broken by them. `cli.py update` also leaves them out now.
+- **Safe to stop.** Every race is saved as soon as it arrives, so Ctrl+C,
+  `--max-requests` or an error loses nothing; run it again to carry on. A
+  race that came back empty is retried only while it is under 14 days old.
+  Fetches are logged in the database's `fetch_log` table.
+
+### Stages
+
+| stage | adds | rows |
+|---|---|---|
+| `pre` | before the weekend: earlier races only | every race, 1950 on |
+| `post_quali` | that weekend's qualifying and starting grid | every race |
+| `post_sprint` | the sprint result | sprint weekends, 2021 on |
+
+- In 2021-22 the sprint set the race grid, so on those weekends the
+  `post_quali` grid already includes the sprint.
+- The ELO columns after a sprint are the post-qualifying ones: the engine
+  has no sprint pass.
+
+### The table
+
+- **Where.** `output/features_<stage>.parquet`, cached with a key of every
+  setting (`FeatureConfig` and `EloConfig` in `config.py`) and a
+  fingerprint of every input table. A full build takes about 3 s per stage
+  once the ELO predictions are cached; a cached load about 1 s.
+- **Joining.** Same rows and order as `calibration.cached_predictions`;
+  join on raceId + driverId (unique from 1965). For the 1950s shared drives
+  add constructorId and `entry`.
+- **Missing values.** Values not recorded in an era are NaN, never 0.
+- **Relative versions.** `<feature>_rel` is the value minus the mean of
+  the cars in that race that have it, because the levels drift with the
+  era.
+- **Labels.** Columns starting `y_` are what happened in the race. They
+  are labels, never features.
+
+Ids: `raceId, year, round, name, circuitId, driverId, constructorId,
+entry, n` (n = cars in the race).
+
+"Years" says where values exist. The form features average earlier races,
+so the lap features start from the second race of 1996 (98-99% of rows from
+1996 on, with the full lap history in `data/`), and the pit-stop feature
+from the second race of 2011. Qualifying times are sparse in 1994-2003
+(32-37% of rows): Jolpica has qualifying for only 1-10 races a year in
+1996-2002.
+
+| feature | stage | years | meaning |
+|---|---|---|---|
+| `elo_driver`, `elo_car`, `elo_strength`, `elo_confidence` | all | 1950+ | the engine's D, C, D + 1.25 C and driver confidence (post_quali: after the weekend's qualifying pass) |
+| `elo_p_dnf` | all | 1950+ | the retirement model's chance (post_quali: with the grid-slot step) |
+| `elo_win`, `elo_podium`, `elo_points`, `elo_exp_pos` | all | 1950+ | the ELO simulation's chances and expected position if classified |
+| `elo_rank` | all | 1950+ | 1 = strongest car in the race |
+| `dnf_base`, `dnf_team`, `dnf_driver` | all | 1950+ | the retirement model's field / team / driver rates (reliability.py) |
+| `drv_deficit`, `team_deficit` | all | 1950+ | mean gap to the winner when classified, % of the race (lead lap: time; lapped: laps down / race laps), over the last `form_races` (10) races |
+| `drv_laps_down`, `team_laps_down` | all | 1950+ | mean laps behind the winner when classified |
+| `drv_gained`, `team_gained` | all | 1950+ | mean places gained from grid to finish when classified |
+| `drv_finished`, `team_finished` | all | 1950+ | finishing rate |
+| `drv_fastlap`, `team_fastlap` | all | 2004+ | mean fastest-lap gap to the race's fastest, % |
+| `drv_pace`, `team_pace` | all | 1996+ | mean race pace: median clean lap vs each lap's field median, % (rule below) |
+| `drv_consistency`, `team_consistency` | all | 1996+ | mean robust spread of clean laps, % |
+| `drv_lap1_gain`, `team_lap1_gain` | all | 1996+ | mean places gained on lap 1 (grid rank − position after lap 1) |
+| `team_pit` | all | 2011+ | team's median stop vs the race's median stop, s (stops over 2× the median, or 2 min, left out) |
+| `drv_races`, `team_races` | all | 1950+ | races in the form window (0 = no history) |
+| `circ_grid_corr` | all | 1950+ | how well grid order holds: grid-to-finish rank correlation of classified cars |
+| `circ_lap1_out` | all | 1950+ | share of starters out on lap 1 (results.laps = 0) |
+| `circ_dnf` | all | 1950+ | retirement rate |
+| `circ_pole_win` | all | 1950+ | share of races won from pole |
+| `circ_*_rel` | all | 1950+ | the circuit's difference from the field at the time (the `circ_*` value = the field's level over its last 40 races + this) |
+| `circ_races`, `street` | all | 1950+ | earlier races at the circuit; street / temporary circuit (`STREET_CIRCUITS` in config.py) |
+| `era_start`, `era_race` | all | 1950+ | the regulation era's first season; races since it began (0 = first race) |
+| `round`, `season_progress`, `field_size`, `sprint_weekend` | all | 1950+ | round, round / rounds in the season, cars in the race, sprint weekend (from the calendar) |
+| `age`, `starts`, `team_starts` | all | 1950+ | age at the race, earlier starts, earlier starts with this team |
+| `home`, `team_home` | all | 1950+ | driver's / team's nationality is the circuit's country (`NATIONALITY_COUNTRY`) |
+| `q_pos` | post_quali | 1994+ | qualifying position |
+| `q_gap_pole` | post_quali | 1994+ | best session time vs the fastest, % |
+| `q_gap_tm` | post_quali | 1994+ | vs the team's fastest other car, in the deepest session both set a time in, % |
+| `q_grid`, `q_grid_rank`, `q_grid_slot`, `q_pit_lane` | post_quali | 1950+ | grid (NaN = pit lane), rank with pit lane last, (rank − 1) / (n − 1), pit-lane start |
+| `q_grid_penalty` | post_quali | 1994+ | grid − qualifying position (+ = dropped back) |
+| `s_finish`, `s_dnf`, `s_gained`, `s_grid` | post_sprint | 2021+ | sprint place among classified, sprint retirement, places gained, sprint grid rank |
+| `*_rel` | as above | as above | relative versions of the ELO, retirement, driver, form and qualifying-gap features |
+
+Labels: `y_finish` (place among the classified cars, 0 = DNF, as
+calibration counts it), `y_dnf`, `y_win`, `y_podium`, `y_points` (with
+`points_positions`), `y_laps`, `y_laps_share` (laps / the winner's laps),
+`y_dnf_cause`, `y_status`, `y_deficit`, `y_gained`, `y_pace`,
+`y_lap1_gain`, `y_grid_order` (that race's grid-to-finish correlation).
+- `y_dnf_cause` sorts retirements into incident (accident, collision,
+  spun off, damage, puncture), other (disqualified, withdrew, did not
+  start, driver unwell), unknown ("Retired", which is almost every
+  retirement since 2023) and mechanical (everything else). The lists are
+  `DNF_*` in config.py.
+
+**Clean laps** (race pace, consistency). Per race:
+1. Lap 1 is dropped, and so are each driver's pit in-laps and out-laps
+   (2011 on, from `pit_stops`).
+2. A lap whose field median is more than 5% slower than the race's median
+   lap is neutralised and dropped for everyone (safety car, VSC, a shower).
+3. A driver's lap more than 10% off that lap's field median is dropped
+   (pit laps before 2011, spins, damage, timing glitches).
+4. Pace is the median of what's left, relative to each lap's field median;
+   consistency is 1.4826 × the median absolute deviation. Each needs at
+   least 5 clean laps.
+
+All thresholds are in `FeatureConfig`.
+
+**Circuit history.**
+- Only the circuit's last 10 visits count (`circuit_visits`): Monaco held
+  its grid order like an average track until the 2000s, and better than
+  any track since 2015.
+- Each visit is measured against the field over the 40 races up to it, so
+  the measure is era-neutral.
+- The circuit's average difference is shrunk toward 0 by 3 races' worth
+  (`circuit_shrink`), so a circuit with little history counts as average.
+- With the current data the order looks right: Monaco and Barcelona hold
+  grid order most, and Interlagos, Monza, Spa, Austin and Las Vegas least.
+
+### Checks
+
+- **Leakage** (`test_features_leakage.py`). For 11 races from 1965 to
+  2026, a copy of the data is made with every later race removed and the
+  race's own result scrambled. Its laps and pit stops are deleted. Its
+  qualifying, grid and sprint are deleted or scrambled too, unless the
+  stage may see them. Each stage's features must come out identical (to
+  1e-9). The engine is replayed on the same copy, so the ELO ratings,
+  confidence and retirement chances are checked the same way. A planted
+  leak (form averages including the race itself) is caught.
+- **Coverage.** `output/features_coverage_<stage>_by_era.csv` and
+  `_by_year.csv` give the share of rows with a value, per feature.
+  `build_features.py` prints a summary by group.
+- **Signal** (`output/features_signal_<stage>.csv`, default 1990-2022). No
+  fitting, just rank correlations and AUCs:
+  - `finish_rho`: within-race rank correlation with the finishing place.
+  - `beyond_elo`: the same, partial on the ELO model's expected position.
+    It shows what a feature says about the order that the ratings don't,
+    and is 0 for ELO's own expected position.
+  - `dnf_auc` and `dnf_beyond`: the AUC for retirements, overall and
+    within tenths of the ELO model's P(DNF). P(DNF) itself scores 0.53 on
+    `dnf_beyond`, because tenths are coarse; that is the bar to beat.
+  - Race-level correlations for one-value-per-race features (circuit,
+    era).
 
 ## Notes vs. the original notebook
 

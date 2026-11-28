@@ -36,6 +36,60 @@ def load_data(data_dir: Path | str | None = None) -> dict[str, pd.DataFrame]:
     }
 
 
+# Tables for the race features, with the columns they need. Optional files
+# that are missing come back as empty frames with these columns.
+RAW_TABLES = {
+    "races": (config.RACES_CSV, None, True),
+    "results": (config.RESULTS_CSV, None, True),
+    "drivers": (config.DRIVERS_CSV, ["driverId", "driverRef", "dob", "nationality"], True),
+    "constructors": (config.CONSTRUCTORS_CSV, ["constructorId", "constructorRef",
+                                               "nationality"], True),
+    "qualifying": (config.QUALIFYING_CSV, ["raceId", "driverId", "constructorId",
+                                           "position", "q1", "q2", "q3"], False),
+    "sprint_results": (config.SPRINT_RESULTS_CSV, ["raceId", "driverId", "constructorId",
+                                                   "grid", "position", "positionOrder",
+                                                   "laps", "statusId"], False),
+    "status": (config.STATUS_CSV, ["statusId", "status"], False),
+    "circuits": (config.CIRCUITS_CSV, ["circuitId", "circuitRef", "country"], False),
+    "lap_times": (config.LAP_TIMES_CSV, ["raceId", "driverId", "lap", "position",
+                                         "milliseconds"], False),
+    "pit_stops": (config.PIT_STOPS_CSV, ["raceId", "driverId", "stop", "lap",
+                                         "milliseconds"], False),
+}
+
+
+def load_lap_times(data_dir: Path | str | None = None) -> pd.DataFrame:
+    """lap_times.csv (raceId, driverId, lap, position, milliseconds), 1996
+    onwards; empty if the file isn't there (see update_laps.py)."""
+    return load_raw(data_dir, ["lap_times"])["lap_times"]
+
+
+def load_pit_stops(data_dir: Path | str | None = None) -> pd.DataFrame:
+    """pit_stops.csv (raceId, driverId, stop, lap, milliseconds), 2011
+    onwards; empty if the file isn't there (see update_laps.py)."""
+    return load_raw(data_dir, ["pit_stops"])["pit_stops"]
+
+
+def load_raw(data_dir: Path | str | None = None, tables=None) -> dict[str, pd.DataFrame]:
+    """The raw CSVs the race features use (``RAW_TABLES``), ``\\N`` read as
+    missing. ``tables``: only these. Required files must exist; optional
+    ones that don't come back empty."""
+    data_dir = Path(data_dir) if data_dir is not None else config.DATA_DIR
+    out = {}
+    for name in (tables or RAW_TABLES):
+        fname, cols, required = RAW_TABLES[name]
+        path = data_dir / fname
+        if not path.exists():
+            if required:
+                _read(path)                       # raises the friendly error
+            out[name] = pd.DataFrame(columns=cols)
+            continue
+        frame = pd.read_csv(path, na_values=["\\N"], keep_default_na=False,
+                            usecols=cols, low_memory=False)
+        out[name] = frame
+    return out
+
+
 def build_race_frame(data_dir: Path | str | None = None) -> pd.DataFrame:
     """Merge results + races into one chronologically sorted DataFrame.
 

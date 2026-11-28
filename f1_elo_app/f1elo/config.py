@@ -29,6 +29,91 @@ DRIVERS_CSV = "drivers.csv"
 # Optional: real qualifying positions (1994 onwards). Without it, the
 # qualifying pass falls back to the starting grid.
 QUALIFYING_CSV = "qualifying.csv"
+# Optional, for the race features (f1elo/features.py) only; missing files
+# just leave those features empty.
+SPRINT_RESULTS_CSV = "sprint_results.csv"
+STATUS_CSV = "status.csv"
+CIRCUITS_CSV = "circuits.csv"
+LAP_TIMES_CSV = "lap_times.csv"      # 1996 onwards (update_laps.py)
+PIT_STOPS_CSV = "pit_stops.csv"      # 2011 onwards (update_laps.py)
+
+
+# ---------------------------------------------------------------------------
+# Race features (f1elo/features.py, build_features.py)
+# ---------------------------------------------------------------------------
+@dataclass
+class FeatureConfig:
+    """Settings of the feature table for the step 6 models. Every value is
+    part of the cache key, so changing one rebuilds the table."""
+
+    # Recent form: averages over each driver's / team's last N races.
+    form_races: int = 10
+    # Circuit history: the circuit's results relative to the field at the
+    # time, shrunk toward the average circuit by this many races' worth
+    # (a circuit visited twice is mostly "average").
+    circuit_shrink: float = 3.0
+    # Only the circuit's last N visits count: tracks and cars change (Monaco
+    # held its grid order like an average track until the 2000s, far better
+    # than any since 2015).
+    circuit_visits: int = 10
+    # The field "at the time" for the circuit features: the last N races.
+    circuit_base_races: int = 40
+    # Clean laps (race pace, consistency): a lap is dropped when the
+    # field's median time on that lap is more than this much slower than
+    # the race's typical lap (safety car, VSC, rain shower) ...
+    neutralised_lap: float = 0.05
+    # ... or the driver's own lap is this much slower than the field's
+    # median on that lap (pit laps before 2011, spins, damage).
+    slow_lap: float = 0.10
+    # Fewest clean laps for a race pace / consistency value.
+    min_clean_laps: int = 5
+    # Pit stops: stops longer than this many times the race's median stop
+    # (repairs, red flags) are left out.
+    pit_outlier: float = 2.0
+
+
+DEFAULT_FEATURES = FeatureConfig()
+
+# Street and temporary circuits (circuitRef), for the "street" flag: walls
+# close to the track, hard to pass, more safety cars.
+STREET_CIRCUITS = (
+    "monaco", "adelaide", "albert_park", "baku", "dallas", "detroit", "jeddah",
+    "las_vegas", "vegas", "long_beach", "marina_bay", "miami", "monsanto",
+    "montjuic", "pedralbes", "phoenix", "valencia", "boavista", "ain-diab",
+    "madring", "sochi",
+)
+
+# Driver / constructor nationality -> the country name circuits.csv uses,
+# for the "home race" flags.
+NATIONALITY_COUNTRY = {
+    "American": "USA", "Argentine": "Argentina", "Australian": "Australia",
+    "Austrian": "Austria", "Belgian": "Belgium", "Brazilian": "Brazil",
+    "British": "UK", "Canadian": "Canada", "Chilean": "Chile", "Chinese": "China",
+    "Colombian": "Colombia", "Czech": "Czech Republic", "Danish": "Denmark",
+    "Dutch": "Netherlands", "East German": "Germany", "Finnish": "Finland",
+    "French": "France", "German": "Germany", "Hong Kong": "China",
+    "Hungarian": "Hungary", "Indian": "India", "Indonesian": "Indonesia",
+    "Irish": "Ireland", "Italian": "Italy", "Japanese": "Japan",
+    "Liechtensteiner": "Liechtenstein", "Malaysian": "Malaysia", "Mexican": "Mexico",
+    "Monegasque": "Monaco", "New Zealander": "New Zealand", "Polish": "Poland",
+    "Portuguese": "Portugal", "Rhodesian": "Rhodesia", "Russian": "Russia",
+    "South African": "South Africa", "Spanish": "Spain", "Swedish": "Sweden",
+    "Swiss": "Switzerland", "Thai": "Thailand", "Uruguayan": "Uruguay",
+    "Venezuelan": "Venezuela",
+}
+
+# Why a car retired, for the retirement (survival) model's labels. Statuses
+# not listed are "mechanical" (the long tail is all parts: engine, gearbox,
+# hydraulics ...). Since 2023 almost every retirement is just "Retired",
+# which is "unknown".
+DNF_INCIDENT = ("Accident", "Collision", "Collision damage", "Spun off", "Damage",
+                "Debris", "Fatal accident", "Puncture", "Tyre puncture")
+DNF_OTHER = ("Disqualified", "Excluded", "Underweight", "Withdrew", "Did not start",
+             "Not restarted", "Physical", "Driver unwell", "Injury", "Injured",
+             "Eye injury", "Illness", "Safety concerns", "Safety")
+DNF_UNKNOWN = ("Retired", "Not classified")
+# Entries that never really started (not a first-lap incident).
+DID_NOT_START = ("Withdrew", "Did not start", "Disqualified", "Excluded", "Not restarted")
 
 
 # ---------------------------------------------------------------------------

@@ -130,6 +130,51 @@ def ingest_season(client: JolpicaClient, db: Database, key: str, season: int,
 
 
 # -- per-race datasets ------------------------------------------------------
+def pit_stop_rows(race_id: int, races: list[dict], db: Database) -> list[dict]:
+    rows = []
+    for race in races:
+        for p in race["PitStops"]:
+            rows.append({"raceId": race_id, "driverId": db.driver_by_ref(p["driverId"]),
+                         "stop": _int(p.get("stop")), "lap": _int(p.get("lap")),
+                         "time": p.get("time"), "duration": p.get("duration"),
+                         "milliseconds": to_millis(p.get("duration"))})
+    return rows
+
+
+def lap_time_rows(race_id: int, races: list[dict], db: Database) -> list[dict]:
+    rows = []
+    for race in races:
+        for lap in race["Laps"]:
+            for t in lap["Timings"]:
+                rows.append({"raceId": race_id,
+                             "driverId": db.driver_by_ref(t["driverId"]),
+                             "lap": _int(lap.get("number")),
+                             "position": _int(t.get("position")),
+                             "time": t.get("time"),
+                             "milliseconds": to_millis(t.get("time"))})
+    return rows
+
+
+# key: (path suffix, child list key, target table, row builder)
+RACE_DATASETS = {
+    "pitstops": ("pitstops", "PitStops", "pit_stops", pit_stop_rows),
+    "laps": ("laps", "Laps", "lap_times", lap_time_rows),
+}
+
+
+def ingest_race(client: JolpicaClient, db: Database, key: str, season: int, rnd: int,
+                race_id: int, ttl: float | None = None, log_fetch: bool = True) -> int:
+    """Fetch one race's pit stops or lap times (every page), replace its rows,
+    record the fetch in fetch_log and commit. Returns the number of rows."""
+    suffix, child, table, build = RACE_DATASETS[key]
+    rows = build(race_id, client.get_races(f"{season}/{rnd}/{suffix}", child, ttl), db)
+    db.replace_rows(table, race_id, rows)
+    if log_fetch:
+        db.log_fetch(race_id, key, len(rows), "jolpica")
+    db.commit()
+    return len(rows)
+
+
 def ingest_race_level(client: JolpicaClient, db: Database, key: str, season: int,
                       refresh=False) -> int:
     ttl = ttl_for(season, refresh)
@@ -149,27 +194,8 @@ def ingest_race_level(client: JolpicaClient, db: Database, key: str, season: int
                                      "positionText": s.get("positionText"),
                                      "wins": _int(s.get("wins"))})
             db.replace_rows(f"{kind.lower()}_standings", race_id, rows)
-        elif key == "pitstops":
-            rows = []
-            for race in client.get_races(f"{season}/{rnd}/pitstops", "PitStops", ttl):
-                for p in race["PitStops"]:
-                    rows.append({"raceId": race_id, "driverId": db.driver_by_ref(p["driverId"]),
-                                 "stop": _int(p.get("stop")), "lap": _int(p.get("lap")),
-                                 "time": p.get("time"), "duration": p.get("duration"),
-                                 "milliseconds": to_millis(p.get("duration"))})
-            db.replace_rows("pit_stops", race_id, rows)
-        elif key == "laps":
-            rows = []
-            for race in client.get_races(f"{season}/{rnd}/laps", "Laps", ttl):
-                for lap in race["Laps"]:
-                    for t in lap["Timings"]:
-                        rows.append({"raceId": race_id,
-                                     "driverId": db.driver_by_ref(t["driverId"]),
-                                     "lap": _int(lap.get("number")),
-                                     "position": _int(t.get("position")),
-                                     "time": t.get("time"),
-                                     "milliseconds": to_millis(t.get("time"))})
-            db.replace_rows("lap_times", race_id, rows)
+        elif key in RACE_DATASETS:
+            ingest_race(client, db, key, season, rnd, race_id, ttl)
         done += 1
         db.commit()
     return done
