@@ -531,10 +531,12 @@ py test_features_leakage.py              # the leakage test (add --no-elo to ski
 Ids: `raceId, year, round, name, circuitId, driverId, constructorId,
 entry, n` (n = cars in the race).
 
-"Years" says where values exist: with lap and pit data for every race, the
-lap features run from 1997 (a season of history from 1996) and pit stops
-from 2011. Qualifying times are sparse in 1996-2002: Jolpica has
-qualifying for only 1-10 races a year then.
+"Years" says where values exist. The form features average earlier races,
+so the lap features start from the second race of 1996 (98-99% of rows from
+1996 on, with the full lap history in `data/`), and the pit-stop feature
+from the second race of 2011. Qualifying times are sparse in 1994-2003
+(32-37% of rows): Jolpica has qualifying for only 1-10 races a year in
+1996-2002.
 
 | feature | stage | years | meaning |
 |---|---|---|---|
@@ -548,9 +550,9 @@ qualifying for only 1-10 races a year then.
 | `drv_gained`, `team_gained` | all | 1950+ | mean places gained from grid to finish when classified |
 | `drv_finished`, `team_finished` | all | 1950+ | finishing rate |
 | `drv_fastlap`, `team_fastlap` | all | 2004+ | mean fastest-lap gap to the race's fastest, % |
-| `drv_pace`, `team_pace` | all | 1997+ | mean race pace: median clean lap vs each lap's field median, % (rule below) |
-| `drv_consistency`, `team_consistency` | all | 1997+ | mean robust spread of clean laps, % |
-| `drv_lap1_gain`, `team_lap1_gain` | all | 1997+ | mean places gained on lap 1 (grid rank − position after lap 1) |
+| `drv_pace`, `team_pace` | all | 1996+ | mean race pace: median clean lap vs each lap's field median, % (rule below) |
+| `drv_consistency`, `team_consistency` | all | 1996+ | mean robust spread of clean laps, % |
+| `drv_lap1_gain`, `team_lap1_gain` | all | 1996+ | mean places gained on lap 1 (grid rank − position after lap 1) |
 | `team_pit` | all | 2011+ | team's median stop vs the race's median stop, s (stops over 2× the median, or 2 min, left out) |
 | `drv_races`, `team_races` | all | 1950+ | races in the form window (0 = no history) |
 | `circ_grid_corr` | all | 1950+ | how well grid order holds: grid-to-finish rank correlation of classified cars |
