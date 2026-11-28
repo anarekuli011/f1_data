@@ -18,7 +18,8 @@ f1_elo_app/
 │   ├── reliability.py      # each car's chance of not finishing
 │   ├── simulate.py         # race simulation: chance of every finishing position
 │   ├── calibration.py      # scores, baselines and calibration of the race predictions
-│   └── features.py         # race feature table for the step 6 models
+│   ├── features.py         # race feature table for the step 6 models
+│   └── rank_models.py      # finishing-order models (rank-ordered logit, CatBoost, XGBoost)
 ├── app.py                  # Streamlit app: ratings, race predictions, calibration
 ├── predictions_app.py      # the app's Predictions and Calibration views
 ├── app_common.py           # helpers shared by the app's views
@@ -28,6 +29,8 @@ f1_elo_app/
 ├── update_laps.py          # CLI: lap times and pit stops (Jolpica or the Kaggle files)
 ├── build_features.py       # CLI: the feature table + coverage and signal reports
 ├── test_features_leakage.py # CLI: checks no feature uses its own race or later
+├── train_rank_models.py    # CLI: train + score the finishing-order models vs ELO
+├── test_rank_models.py     # CLI: checks for the finishing-order models (leakage, format)
 ├── make_sample_data.py     # generates fake CSVs so you can test immediately
 ├── requirements.txt
 └── data/                   # <-- put the Kaggle CSVs here (see below)
@@ -632,6 +635,258 @@ All thresholds are in `FeatureConfig`.
     `dnf_beyond`, because tenths are coarse; that is the bar to beat.
   - Race-level correlations for one-value-per-race features (circuit,
     era).
+
+## Finishing-order models (step 6b)
+
+`f1elo/rank_models.py` trains models for the finishing order among the cars
+that finish, and plugs their strengths into the race simulation in place of
+ELO's `D + 1.25*C`. Retirements stay with the ELO retirement model (P(DNF),
+`dnf_race_corr` and, after qualifying, `dnf_grid_*`), with the same seeds:
+each model's table has exactly the same retirement draws as ELO's, and
+only the order of the finishers differs.
+
+```powershell
+py train_rank_models.py                                    # both stages, every model (~25 min)
+py train_rank_models.py --stage post_quali --models logit  # one model (~1 min)
+py train_rank_models.py --stage pre --models logit --logit-set form --lam 1 3 10
+py train_rank_models.py --stage post_quali --models xgb --depth 2 3 --iterations 1500 --checkpoints 500 1000 1500
+py train_rank_models.py --models logit,xgb --no-save --boot 0   # a quick look, nothing written
+py test_rank_models.py --trees                             # checks (leakage, format), ~2 min
+```
+
+### The models
+
+| model | what | settings chosen |
+|---|---|---|
+| `logit` | rank-ordered logit (Plackett-Luce with features): strength = a linear combination of the features, fitted by maximum likelihood over each race's classified order, L2 penalty on the standardised coefficients | after qualifying: ELO strength, qualifying gap, grid slot, log grid rank, pit lane, gap to teammate, driver and team race pace, team gap to the winner, fastest-lap gap; λ 10. Pre-race: driver ELO, car ELO and the same four form features; λ 3 |
+| `catboost` | CatBoost YetiRank ranker, grouped by race, starting from ELO's strength | depth 3, lr 0.05, l2 10; 800 trees after qualifying, 200 pre-race |
+| `xgb` | XGBoost `rank:pairwise`, from scratch | depth 2, lr 0.03, l2 10; 1,200 trees after qualifying, 600 pre-race |
+| `xgb_pl` | XGBoost with the exact Plackett-Luce loss as a custom objective, starting from ELO's strength | depth 2, lr 0.02, min_child_weight 100; 600 / 100 trees |
+
+- Trees get every stage feature (60 after qualifying), in the relative
+  (`_rel`) version where one exists, and handle missing values
+  themselves. The logit fills a missing value with the race's average car
+  and adds a missing-value indicator.
+- A tiny neural network was not built. The plan made it conditional on
+  the trees showing clear non-linear gains over the logit, and they
+  don't: after qualifying the best tree is 0.0025 better on podium log
+  loss, and pre-race the trees lose on the holdout.
+
+### Validation
+
+- **Walk-forward.** For every season s from 2000, train on 1990 to s-1 and
+  predict season s. Only classified cars are trained on; every car gets a
+  strength. Settings (penalty, depth, number of trees) are chosen on the
+  2005-2022 seasons. The 2023-2026 holdout is predicted the same way,
+  season by season, with those settings frozen.
+- **From scores to strengths.** A model's scores are multiplied by a
+  temperature `t`, and the first 3 places get their own `t_top` (like
+  ELO's `finish_top_scale`). For season s both are fitted on the
+  walk-forward predictions of the seasons before s, so the tables (from
+  2003) are fully out of sample. In the table, `strength` is in rating
+  points at ELO's scale (`S = t * x * 525 / ln 10`, top scale
+  `525 * t / t_top`), so `simulate.simulate_race` runs unchanged.
+- **Checks** (`test_rank_models.py`). The gradient matches finite
+  differences. ELO's likelihood matches `calibration.pl_order_loglik`
+  exactly. Scrambling the results of season s and later leaves every
+  model's predictions for s unchanged, while scrambling s-1 changes
+  them. The table has exactly `cached_predictions`' 61 columns. The
+  retirements are identical to ELO's table.
+
+### Results
+
+Lower is better. 2005-2022: 348 races, walk-forward. 2023-2026: 91
+races, holdout. 95% intervals come from resampling races, 2,000 times;
+they are in `output/rank_models_scores_<stage>.csv`.
+
+**After qualifying**
+
+| predictor | win ll | podium ll | points ll | RPS |
+|---|---|---|---|---|
+| ELO | 1.677 / 1.523 | 0.2422 / 0.2498 | 0.4854 / 0.4805 | 0.1389 / 0.1254 |
+| grid slot (step 4, fitted 1990-2022) | 1.405 / 1.265 | 0.2379 / 0.2364 | 0.5144 / 0.5198 | 0.1432 / 0.1295 |
+| grid slot (walk-forward) | 1.378 / 1.272 | 0.2424 / 0.2350 | 0.5309 / 0.5167 | 0.1466 / 0.1289 |
+| logit | 1.367 / 1.190 | 0.2166 / 0.2147 | 0.4665 / 0.4496 | 0.1343 / 0.1162 |
+| catboost | 1.388 / 1.188 | 0.2156 / 0.2141 | **0.4636** / 0.4480 | 0.1342 / 0.1169 |
+| **xgb** | **1.355 / 1.119** | **0.2140 / 0.2072** | 0.4646 / **0.4474** | **0.1341** / 0.1165 |
+| xgb_pl | 1.368 / 1.152 | 0.2175 / 0.2188 | 0.4697 / 0.4554 | 0.1349 / 0.1180 |
+
+- **Every model beats ELO** on every score in both periods. The
+  intervals of the differences exclude 0: for `xgb` on 2005-2022, win
+  -0.32 (-0.39 to -0.25), podium -0.028, points -0.021, RPS -0.005.
+- **Winners.** `xgb` beats the grid-slot table that beat ELO in step 4:
+  1.355 vs 1.405 on 2005-2022 and 1.119 vs 1.265 on 2023+. That is ahead
+  in both periods, but not significantly: the differences are -0.050
+  (interval -0.114 to +0.016) and -0.146 (-0.323 to +0.007). It beats the
+  grid table on every other score by a wide margin.
+- **xgb vs logit.** Better on podium in both periods (+0.0025 for the
+  logit on 2005-2022, interval 0.000 to 0.005; +0.0075 on 2023+) and on
+  2023+ winners (+0.07). Equal on points and RPS.
+- **Calibration** (`output/rank_models_bands_post_quali.csv`, 2005-2022).
+  Podium favourites above 80% are still overconfident, though less than
+  ELO: 0.866 predicted vs 0.813 actual for `xgb`, against 0.857 vs 0.766
+  for ELO. The win bands are within a few points everywhere.
+
+**Pre-race**
+
+| predictor | win ll | podium ll | points ll | RPS |
+|---|---|---|---|---|
+| ELO | 1.741 / **1.581** | 0.2505 / 0.2597 | 0.4967 / 0.4948 | 0.1410 / 0.1291 |
+| logit | 1.745 / 1.616 | 0.2489 / 0.2603 | 0.4958 / **0.4930** | 0.1407 / **0.1286** |
+| catboost | 1.744 / 1.595 | 0.2480 / **0.2592** | **0.4950** / 0.4941 | **0.1406** / 0.1289 |
+| xgb | **1.719** / 1.605 | **0.2476** / 0.2624 | 0.4951 / 0.4944 | 0.1407 / 0.1295 |
+| xgb_pl | 1.736 / 1.607 | 0.2490 / 0.2611 | 0.4964 / 0.4948 | 0.1408 / 0.1291 |
+
+- **The gains are about 1% at most and don't hold up.** The best on
+  2005-2022 is `xgb` on podium (-0.0030, interval -0.006 to 0.000), and
+  it is worse than ELO on the 2023+ podium (+0.0027).
+- **No model beats ELO on every score in both periods.** Before
+  qualifying, ELO's ratings already hold most of what the form features
+  know.
+
+### Recommendation for the app (step 6d)
+
+- **After qualifying: `xgb`** (`race_predictions_xgb_post_quali.parquet`,
+  `models/xgb_post_quali.*`). It is the only model that is best or tied
+  best on every score in both periods. The logit is the runner-up: almost
+  as good, and readable, if a transparent model is preferred.
+- **Pre-race: keep ELO.** No model passes the rule: better than ELO on
+  every score on 2005-2022 and no worse on the 2023+ podium, points and
+  RPS.
+- **For 6d.**
+  - `rank_models.read_table(model, stage)` returns a table in exactly
+    `cached_predictions`' format, so `calibration.race_table` works on it
+    unchanged.
+  - It covers the races from 2003 only (out of sample).
+  - The next, unrun race has no feature row yet, so the app's next-race
+    prediction needs the features built for it, plus the saved model and
+    its temperature (in `output/models/<model>_<stage>.json`).
+  - Rerun `py train_rank_models.py --stage post_quali --models xgb` after
+    new races (a few minutes).
+
+### What the evidence chose, and why
+
+Walk-forward losses per race on 2005-2022, after qualifying: the whole
+classified order, the first three places, and the winner among the
+finishers. All use the same temperatures, fitted on the whole order.
+
+| model | order | top 3 | winner |
+|---|---|---|---|
+| ELO, its own settings (525 / 400 top 3) | 27.97 | 5.02 | 1.538 |
+| ELO strengths with a fitted temperature | 27.46 | 5.03 | 1.542 |
+| logit: ELO + qualifying (straight-line grid slot) | 26.55 | 4.51 | 1.306 |
+| ... + race-pace form | 26.44 | 4.49 | 1.312 |
+| ... gaps clipped at the 2% / 98% quantiles | 26.37 | 4.49 | 1.302 |
+| ... + log grid rank (the chosen set) | 26.37 | 4.38 | 1.212 |
+
+- **Qualifying is most of the gain.** This matches 6a's signal check.
+- **The log grid rank fixes the winners.** With only a straight line in
+  the grid slot, pole is worth too little.
+  - A pole dummy (26.49) or a front-row dummy (26.53) was worse.
+- **Gaps are clipped at the 2% / 98% quantiles.** Wet qualifying gives
+  gaps of 10-37%, which dominate a linear term unclipped.
+  - Clipping 5% or 10% was worse.
+  - So was clipping only the slow tail.
+- **Missing qualifying times** (the qualifying set, before clipping).
+  Training from 1990 with a race-average fill and indicators was best:
+  26.55. Without the indicators: 26.55.
+  From 1996: 26.56. From 2004: 27.40. On 2008-2022, where every variant
+  has a fair start, the 2004 start is still worst (27.40 vs 27.32). The
+  extra seasons beat cleaner data.
+- **Not kept.**
+  - Grid × circuit terms (`circ_grid_corr_rel × grid slot`,
+    `circ_pole_win_rel × pole`, `street × grid slot`) were slightly worse,
+    as 6a's signal check suggested.
+  - Splitting ELO into D and C was worse after qualifying (26.48 vs
+    26.44), but better pre-race.
+- **Pre-race,** ELO with its own settings: 28.41 / 5.19 / 1.596. The
+  "split" set: 27.56 / 5.15 / 1.602. A log ELO-rank term was worse.
+- **Trees.**
+  - Each tree model was tuned over the learning rate, depth and number
+    of trees.
+  - `xgb_pl` and CatBoost PairLogit overfit or ran slowly: PairLogit is
+    about 4 times slower than YetiRank, so it is off by default.
+  - CatBoost and `xgb_pl` are best starting from ELO's strength; `xgb`
+    is best from scratch.
+- **Two temperatures, and where the main one is fitted.**
+  - How predictable a place is falls steadily down the order.
+    Fitted on P4-P5, `t_top` is about 1.3 × `t`, the same ratio as
+    ELO's 525 / 400. Against a `t` fitted on the whole order it is about
+    2 ×.
+  - With one temperature for P4 to the last car, fitting it on the
+    whole order makes it too flat for the points places.
+    - It was fitted instead on P4-P5 (`--temp-places`, chosen by
+      simulated points log loss: P4-P5, P4-P6, P4-P8 and the whole
+      order were tried).
+    - This improves points log loss by 0.01 after qualifying and 0.008
+      pre-race, and leaves win and podium unchanged.
+  - Rescaling ELO's own strengths this way gains nothing (`elo +
+    temperature`), so the models' gains come from the features, not the
+    rescaling.
+  - 3 top places was best on the top-3 loss for every model. 1 top place
+    is better for the winner alone (1.185 vs 1.217 for the logit), so the
+    podium choice costs a little on win log loss.
+
+### What the models learned
+
+**Logit after qualifying** (final model, 1990-2026). Each effect is in ELO
+points: how much ELO strength the model treats as equal to it.
+
+- **Grid slot, in a 20-car field:**
+  - pole vs P2: 369 points
+  - P2 vs P3: 238
+  - P5 vs P6: 137
+  - P10 vs P11: 98
+  - a pit-lane start: a further 354
+- **Qualifying gap:** 0.1% is worth 16 points.
+- **Race pace form:** 1% of driver race pace is worth 274 points, and 1%
+  of team race pace another 274. Team gap to the winner: 178 per 1%.
+  Fastest lap: 81 per 1%.
+- **Gap to the teammate:** 1% slower than the teammate costs 75 points,
+  beyond the grid and the pole gap. This is small, and the opposite sign
+  to 6a's raw beyond-grid correlation, which didn't hold the pole gap
+  fixed.
+- **ELO's own weight after qualifying is small.** One ELO point is worth
+  0.26 rating points of simulation strength, against 1 in the ELO
+  simulation: qualifying already shows most of the car's pace.
+
+**Logit pre-race.**
+- D and C get almost equal weight per point (0.00195 vs 0.00185), so the
+  model puts less weight on the car than ELO's 1.25 does.
+- 1% of driver race pace is worth 107 driver-ELO points; team pace 115,
+  team gap to the winner 69, fastest lap 21 (per 1%).
+
+**Trees** (mean |SHAP|, `output/rank_models_importance_<stage>.csv`).
+- **After qualifying:**
+  - the grid slot and rank, ELO strength and the car's ELO, the
+    qualifying gap, driver and team race pace and log ELO rank;
+  - then a long tail: age, team consistency and starts.
+- **Pre-race:**
+  - ELO strength, the car's ELO, the log ELO rank, race pace and ELO's
+    podium chance;
+  - CatBoost leans more on team race pace and finishing rate.
+
+### Files (output/, gitignored)
+
+- `race_predictions_<model>_<stage>.parquet` (+ `.json`): the model's
+  prediction table, with exactly the columns of
+  `race_predictions_<stage>.parquet`, for 2003 on. The `.json` records the
+  settings, the temperatures' setup and whether the model is the
+  recommended one.
+- `rank_models_scores_<stage>.csv`: model × period × metric with
+  intervals. The `reference` column says what `diff` is against: `elo`,
+  or the recommended model, so the models are compared with each other.
+- `rank_models_bands_<stage>.csv`: calibration bands for win, podium and
+  points (per points era), for every predictor.
+- `rank_models_tuning_<stage>.csv`: every setting and number of trees
+  tried, with the walk-forward losses.
+- `rank_models_importance_<stage>.csv`: logit coefficients (per unit,
+  per sd, in ELO points and in rating points) and the trees' mean |SHAP|
+  (plus CatBoost's PredictionValuesChange and XGBoost's total gain).
+- `rank_models_temperatures_<stage>.csv`: each season's `t` / `t_top`.
+- `models/<model>_<stage>.json` (+ `.cbm` CatBoost / `.ubj` XGBoost): the
+  final models, trained on 1990 to the latest season, with their
+  temperatures and settings.
 
 ## Notes vs. the original notebook
 
